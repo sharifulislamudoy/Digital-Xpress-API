@@ -70,7 +70,7 @@ export async function sendOtpEmail(email: string, otp: string) {
   await transporter.sendMail({
     from: process.env.SMTP_FROM,
     to: email,
-    subject: '🔐 Your Digital Xpress Verification Code',
+    subject: 'Your Digital Xpress Verification Code',
     html: emailTemplate(content),
   });
 }
@@ -95,7 +95,7 @@ export async function sendWelcomeEmail(email: string, name?: string) {
   await transporter.sendMail({
     from: process.env.SMTP_FROM,
     to: email,
-    subject: '🎉 Welcome to Digital Xpress!',
+    subject: 'Welcome to Digital Xpress!',
     html: emailTemplate(content),
   });
 }

@@ -99,3 +99,77 @@ export async function sendWelcomeEmail(email: string, name?: string) {
     html: emailTemplate(content),
   });
 }
+
+export async function sendBanEmail(email: string, name: string | undefined, reason: string) {
+  const contactPhone = process.env.CONTACT_PHONE || "+8801995322033";
+  const contactEmail = process.env.CONTACT_EMAIL || "info@digital-xpress-bd.com";
+  const displayName = name || "User";
+
+  const content = `
+    <h2 style="color:#dc2626;font-size:22px;margin-top:0;">Account Banned</h2>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Dear ${displayName},</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Your Digital Xpress account has been <strong style="color:#dc2626;">banned</strong>.</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;"><strong>Reason:</strong> ${reason}</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">If you believe this is an error, please contact support.</p>
+    <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:16px;margin:32px 0;border-radius:8px;">
+      <p style="margin:0 0 8px 0;font-weight:600;color:#991b1b;">Contact Information:</p>
+      <p style="margin:4px 0;"><a href="tel:${contactPhone}" style="color:#f97316;text-decoration:none;">📞 ${contactPhone}</a></p>
+      <p style="margin:4px 0;"><a href="mailto:${contactEmail}" style="color:#f97316;text-decoration:none;">✉️ ${contactEmail}</a></p>
+    </div>
+    <div style="margin-top:28px;padding-top:20px;border-top:1px solid #e5e7eb;">
+      <p style="color:#6b7280;font-size:13px;">Digital Xpress Team</p>
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: email,
+    subject: 'Your Digital Xpress Account Has Been Banned',
+    html: emailTemplate(content),
+  });
+}
+
+export async function sendUnbanEmail(email: string, name?: string) {
+  const loginUrl = `${process.env.FRONTEND_URL}/login`;
+  const displayName = name || "User";
+
+  const content = `
+    <h2 style="color:#16a34a;font-size:22px;margin-top:0;">Account Reinstated</h2>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Dear ${displayName},</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Your account has been <strong style="color:#16a34a;">unbanned</strong>. You can now log in again.</p>
+    <div style="text-align:center;margin:36px 0;">
+      <a href="${loginUrl}" target="_blank" style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-weight:600;font-size:16px;padding:14px 36px;border-radius:40px;text-decoration:none;box-shadow:0 4px 12px rgba(249,115,22,0.4);">Login to Your Account</a>
+    </div>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;margin-top:20px;">Happy shopping!</p>
+    <div style="margin-top:28px;padding-top:20px;border-top:1px solid #e5e7eb;">
+      <p style="color:#6b7280;font-size:13px;">If you have any questions, reply to this email.</p>
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: email,
+    subject: 'Your Digital Xpress Account Has Been Unbanned',
+    html: emailTemplate(content),
+  });
+}
+
+export async function sendDeletionEmail(email: string, name?: string) {
+  const displayName = name || "User";
+  const content = `
+    <h2 style="color:#dc2626;font-size:22px;margin-top:0;">Account Permanently Deleted</h2>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Dear ${displayName},</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">Your Digital Xpress account has been <strong style="color:#dc2626;">permanently deleted</strong> by an administrator.</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">All your data has been removed from our system. You cannot log in or recover this account.</p>
+    <p style="color:#4b5563;font-size:16px;line-height:1.6;">If you believe this was a mistake, please contact support.</p>
+    <div style="margin-top:28px;padding-top:20px;border-top:1px solid #e5e7eb;">
+      <p style="color:#6b7280;font-size:13px;">Digital Xpress Team</p>
+    </div>
+  `;
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: email,
+    subject: 'Your Digital Xpress Account Has Been Deleted',
+    html: emailTemplate(content),
+  });
+}

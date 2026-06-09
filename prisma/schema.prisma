@@ -7,7 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Define the Role enum
 enum Role {
   admin
   moderator
@@ -22,7 +21,9 @@ model User {
   image         String?
   password      String?
   mobile        String?   @unique
-  role          Role      @default(customer)   // default role for all new users
+  role          Role      @default(customer)
+  isBanned      Boolean   @default(false)
+  sessionVersion Int      @default(1)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -36,4 +37,14 @@ model PendingRegistration {
   otpCode      String
   expiresAt    DateTime
   createdAt    DateTime @default(now())
+}
+
+model BannedUser {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  mobile    String
+  name      String?
+  reason    String
+  bannedAt  DateTime @default(now())
+  bannedBy  String?  // admin/moderator id who performed the ban
 }

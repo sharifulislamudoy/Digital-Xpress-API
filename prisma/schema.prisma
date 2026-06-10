@@ -14,18 +14,20 @@ enum Role {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
-  password      String?
-  mobile        String?   @unique
-  role          Role      @default(customer)
-  isBanned      Boolean   @default(false)
-  sessionVersion Int      @default(1)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id             String    @id @default(cuid())
+  name           String?
+  email          String?   @unique
+  emailVerified  DateTime?
+  image          String?
+  password       String?
+  mobile         String?   @unique
+  role           Role      @default(customer)
+  isBanned       Boolean   @default(false)
+  sessionVersion Int       @default(1)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  banners        Banner[]
 }
 
 model PendingRegistration {
@@ -40,11 +42,33 @@ model PendingRegistration {
 }
 
 model BannedUser {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  mobile    String
-  name      String?
-  reason    String
-  bannedAt  DateTime @default(now())
-  bannedBy  String?  // admin/moderator id who performed the ban
+  id       String   @id @default(cuid())
+  email    String   @unique
+  mobile   String
+  name     String?
+  reason   String
+  bannedAt DateTime @default(now())
+  bannedBy String?
+}
+
+model Banner {
+  id                String   @id @default(cuid())
+  imageUrl          String
+  cloudinaryPublicId String
+  productLink       String?
+  isPublished       Boolean  @default(true)
+
+  createdById       String?
+  createdByName     String?
+  createdByEmail    String?
+  createdByRole     Role
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  createdBy         User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([isPublished])
+  @@index([createdByRole])
+  @@index([createdAt])
 }

@@ -13,6 +13,20 @@ enum Role {
   customer
 }
 
+enum ProfitType {
+  FIXED
+  PERCENTAGE
+}
+
+enum StockStatus {
+  IN_STOCK
+  LIMITED_STOCK
+  LOW_STOCK
+  OUT_OF_STOCK
+  PRE_ORDER
+  COMING_SOON
+}
+
 model User {
   id             String    @id @default(cuid())
   name           String?
@@ -27,7 +41,7 @@ model User {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  banners        Banner[]
+  banners Banner[]
 }
 
 model PendingRegistration {
@@ -52,23 +66,126 @@ model BannedUser {
 }
 
 model Banner {
-  id                String   @id @default(cuid())
-  imageUrl          String
+  id                 String  @id @default(cuid())
+  imageUrl           String
   cloudinaryPublicId String
-  productLink       String?
-  isPublished       Boolean  @default(true)
+  productLink        String?
+  isPublished        Boolean @default(true)
 
-  createdById       String?
-  createdByName     String?
-  createdByEmail    String?
-  createdByRole     Role
+  createdById    String?
+  createdByName  String?
+  createdByEmail String?
+  createdByRole  Role
 
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  createdBy         User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([isPublished])
   @@index([createdByRole])
   @@index([createdAt])
+}
+
+model ProductCategory {
+  id            String               @id @default(cuid())
+  name          String
+  slug          String               @unique
+  subCategories ProductSubCategory[]
+  products      Product[]
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+}
+
+model ProductSubCategory {
+  id         String          @id @default(cuid())
+  name       String
+  slug       String
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  products   Product[]
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@unique([categoryId, slug])
+  @@index([categoryId])
+}
+
+model Brand {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  products  Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id        String @id @default(cuid())
+  name      String
+  slug      String @unique
+
+  modelName String?
+
+  shortDescription String?
+  description      String
+
+  mrp Decimal @db.Decimal(12, 2)
+
+  costPrice    Decimal    @db.Decimal(12, 2)
+  profitType   ProfitType @default(PERCENTAGE)
+  profitValue  Decimal    @db.Decimal(12, 2)
+  sellingPrice Decimal    @db.Decimal(12, 2)
+
+  stock       Int         @default(0)
+  stockStatus StockStatus @default(IN_STOCK)
+
+  // kept for old frontend compatibility, but this is now controlled from stockStatus
+  inStock Boolean @default(true)
+
+  isPublished Boolean @default(true)
+
+  mainImageUrl      String
+  mainImagePublicId String
+
+  hoverImageUrl      String?
+  hoverImagePublicId String?
+
+  videoUrl      String?
+  videoPublicId String?
+
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId], references: [id])
+
+  subCategoryId String?
+  subCategory   ProductSubCategory? @relation(fields: [subCategoryId], references: [id])
+
+  brandId String
+  brand   Brand @relation(fields: [brandId], references: [id])
+
+  extraImages ProductImage[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([categoryId])
+  @@index([subCategoryId])
+  @@index([brandId])
+  @@index([sellingPrice])
+  @@index([stockStatus])
+  @@index([isPublished])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  imageUrl           String
+  cloudinaryPublicId String
+  sortOrder          Int    @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([productId])
 }

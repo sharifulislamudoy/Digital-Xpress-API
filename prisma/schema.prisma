@@ -88,13 +88,21 @@ model Banner {
 }
 
 model ProductCategory {
-  id            String               @id @default(cuid())
-  name          String
-  slug          String               @unique
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  seoTitle       String?
+  seoDescription String?
+  seoKeywords    String[] @default([])
+
   subCategories ProductSubCategory[]
   products      Product[]
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([slug])
 }
 
 model ProductSubCategory {
@@ -103,32 +111,62 @@ model ProductSubCategory {
   slug       String
   categoryId String
   category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  products   Product[]
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
+
+  seoTitle       String?
+  seoDescription String?
+  seoKeywords    String[] @default([])
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([categoryId, slug])
   @@index([categoryId])
+  @@index([slug])
 }
 
 model Brand {
-  id        String    @id @default(cuid())
-  name      String
-  slug      String    @unique
-  products  Product[]
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  logoUrl          String?
+  logoCloudinaryId String?
+
+  seoTitle       String?
+  seoDescription String?
+  seoKeywords    String[] @default([])
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([slug])
 }
 
 model Product {
-  id        String @id @default(cuid())
-  name      String
-  slug      String @unique
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  sku         String? @unique
+  productCode String? @unique
+  barcode     String? @unique
 
   modelName String?
 
   shortDescription String?
   description      String
+
+  keyFeatures String[] @default([])
+  highlights  String[] @default([])
+
+  specifications Json?
+
+  tags           String[] @default([])
+  searchKeywords String[] @default([])
 
   mrp Decimal @db.Decimal(12, 2)
 
@@ -137,19 +175,30 @@ model Product {
   profitValue  Decimal    @db.Decimal(12, 2)
   sellingPrice Decimal    @db.Decimal(12, 2)
 
-  stock       Int         @default(0)
-  stockStatus StockStatus @default(IN_STOCK)
+  stock                 Int         @default(0)
+  stockStatus           StockStatus @default(IN_STOCK)
+  lowStockAlertQuantity Int         @default(5)
+  soldQuantity          Int         @default(0)
+  reservedQuantity      Int         @default(0)
 
-  // kept for old frontend compatibility, but this is now controlled from stockStatus
   inStock Boolean @default(true)
 
   isPublished Boolean @default(true)
 
+  isFeatured    Boolean @default(false)
+  isNewArrival  Boolean @default(false)
+  isBestSeller  Boolean @default(false)
+  isTrending    Boolean @default(false)
+  isRecommended Boolean @default(false)
+  isFlashSale   Boolean @default(false)
+
   mainImageUrl      String
   mainImagePublicId String
+  mainImageAlt      String?
 
   hoverImageUrl      String?
   hoverImagePublicId String?
+  hoverImageAlt      String?
 
   videoUrl      String?
   videoPublicId String?
@@ -161,12 +210,77 @@ model Product {
   subCategory   ProductSubCategory? @relation(fields: [subCategoryId], references: [id])
 
   brandId String
-  brand   Brand @relation(fields: [brandId], references: [id])
+  brand   Brand  @relation(fields: [brandId], references: [id])
 
   extraImages ProductImage[]
+  variants    ProductVariant[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  /**
+   * FIFO inventory relations
+   * stockBatches = purchase/stock entry history
+   * saleItems = selling history for this product
+   */
+  stockBatches StockBatch[]
+  saleItems    SaleItem[]
+
+  warrantyDuration String?
+  warrantyDetails  String?
+
+  returnPolicy      String?
+  replacementPolicy String?
+  refundPolicy      String?
+
+  deliveryInfo               String?
+  deliveryCharge             Decimal? @db.Decimal(12, 2)
+  insideDhakaDeliveryCharge  Decimal? @db.Decimal(12, 2)
+  outsideDhakaDeliveryCharge Decimal? @db.Decimal(12, 2)
+  deliveryTime               String?
+  cashOnDelivery             Boolean  @default(true)
+  freeDelivery               Boolean  @default(false)
+  freeDeliveryMinAmount      Decimal? @db.Decimal(12, 2)
+
+  packageIncludes   String[] @default([])
+  packageWeight     String?
+  packageDimensions String?
+
+  supplierName          String?
+  supplierPhone         String?
+  supplierEmail         String?
+  supplierAddress       String?
+  supplierInvoiceNumber String?
+  internalNote          String?
+
+  seoTitle       String?
+  seoDescription String?
+  seoKeywords    String[] @default([])
+  focusKeyword   String?
+  canonicalUrl   String?
+
+  ogTitle       String?
+  ogDescription String?
+  ogImage       String?
+
+  metaRobots String @default("index,follow")
+
+  schemaJson Json?
+
+  viewCount     Int     @default(0)
+  wishlistCount Int     @default(0)
+  cartCount     Int     @default(0)
+  orderCount    Int     @default(0)
+  averageRating Decimal @default(0) @db.Decimal(3, 2)
+  totalReviews  Int     @default(0)
+
+  createdById    String?
+  createdByName  String?
+  createdByEmail String?
+  updatedById    String?
+  updatedByName  String?
+  updatedByEmail String?
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([categoryId])
   @@index([subCategoryId])
@@ -174,6 +288,13 @@ model Product {
   @@index([sellingPrice])
   @@index([stockStatus])
   @@index([isPublished])
+  @@index([isFeatured])
+  @@index([isNewArrival])
+  @@index([isBestSeller])
+  @@index([createdAt])
+  @@index([updatedAt])
+  @@index([slug])
+  @@index([sku])
 }
 
 model ProductImage {
@@ -183,9 +304,228 @@ model ProductImage {
 
   imageUrl           String
   cloudinaryPublicId String
-  sortOrder          Int    @default(0)
+  altText            String?
+  sortOrder          Int     @default(0)
 
   createdAt DateTime @default(now())
 
   @@index([productId])
+  @@index([sortOrder])
+}
+
+model ProductVariant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku String? @unique
+
+  color   String?
+  size    String?
+  ram     String?
+  storage String?
+
+  mrp Decimal? @db.Decimal(12, 2)
+
+  costPrice    Decimal?   @db.Decimal(12, 2)
+  profitType   ProfitType @default(PERCENTAGE)
+  profitValue  Decimal?   @db.Decimal(12, 2)
+  sellingPrice Decimal?   @db.Decimal(12, 2)
+
+  stock       Int         @default(0)
+  stockStatus StockStatus @default(IN_STOCK)
+
+  imageUrl      String?
+  imagePublicId String?
+
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  /**
+   * FIFO inventory relations for variant based stock
+   */
+  stockBatches StockBatch[]
+  saleItems    SaleItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([productId])
+  @@index([sku])
+  @@index([stockStatus])
+  @@index([isActive])
+}
+
+/**
+ * FIFO Stock Batch
+ * Every time you purchase/add stock, create one StockBatch.
+ * Example:
+ * Product: Mouse
+ * Batch 1: 10 pcs, cost 300
+ * Batch 2: 20 pcs, cost 350
+ * During sale, system will consume oldest batch first:
+ * orderBy: createdAt asc
+ */
+model StockBatch {
+  id String @id @default(cuid())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /**
+   * Optional variant support.
+   * If product has no variant, keep variantId null.
+   * If stock is for a specific variant, save variantId.
+   */
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  purchaseQty  Int
+  remainingQty Int
+
+  costPrice Decimal @db.Decimal(12, 2)
+
+  supplierName          String?
+  supplierPhone         String?
+  supplierEmail         String?
+  supplierAddress       String?
+  supplierInvoiceNumber String?
+
+  note String?
+
+  createdById    String?
+  createdByName  String?
+  createdByEmail String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  saleItemBatches SaleItemBatch[]
+
+  @@index([productId])
+  @@index([variantId])
+  @@index([remainingQty])
+  @@index([createdAt])
+  @@index([productId, createdAt])
+  @@index([productId, variantId, createdAt])
+}
+
+/**
+ * Sale main table
+ * One sale/order invoice will create one Sale.
+ */
+model Sale {
+  id String @id @default(cuid())
+
+  invoiceNumber String? @unique
+
+  customerName    String?
+  customerMobile  String?
+  customerEmail   String?
+  customerAddress String?
+
+  totalAmount Decimal @default(0) @db.Decimal(12, 2)
+  totalCost   Decimal @default(0) @db.Decimal(12, 2)
+  totalProfit Decimal @default(0) @db.Decimal(12, 2)
+
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  deliveryCharge Decimal @default(0) @db.Decimal(12, 2)
+
+  paidAmount Decimal @default(0) @db.Decimal(12, 2)
+  dueAmount  Decimal @default(0) @db.Decimal(12, 2)
+
+  note String?
+
+  createdById    String?
+  createdByName  String?
+  createdByEmail String?
+
+  items SaleItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceNumber])
+  @@index([customerMobile])
+  @@index([customerEmail])
+  @@index([createdAt])
+}
+
+/**
+ * Sale item table
+ * One Sale can contain multiple SaleItem.
+ * Example:
+ * Sale #1:
+ * - Mouse 12 pcs
+ * - Keyboard 2 pcs
+ */
+model SaleItem {
+  id String @id @default(cuid())
+
+  saleId String
+  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  /**
+   * Optional variant support.
+   */
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  quantity Int
+
+  sellPrice      Decimal @db.Decimal(12, 2)
+  totalSellPrice Decimal @db.Decimal(12, 2)
+
+  totalCostPrice Decimal @default(0) @db.Decimal(12, 2)
+  profit         Decimal @default(0) @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  /**
+   * Exact FIFO batch consumption history
+   */
+  batchUsages SaleItemBatch[]
+
+  @@index([saleId])
+  @@index([productId])
+  @@index([variantId])
+  @@index([createdAt])
+}
+
+/**
+ * Sale item batch table
+ * This table keeps exact FIFO calculation history.
+ * Example:
+ * Customer bought 12 Mouse.
+ * Batch 1 had 10 pcs at cost 300
+ * Batch 2 had 20 pcs at cost 350
+ * SaleItemBatch:
+ * - batch 1, quantity 10, cost 300
+ * - batch 2, quantity 2, cost 350
+ */
+model SaleItemBatch {
+  id String @id @default(cuid())
+
+  saleItemId String
+  saleItem   SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+
+  stockBatchId String
+  stockBatch   StockBatch @relation(fields: [stockBatchId], references: [id])
+
+  quantity Int
+
+  costPrice      Decimal @db.Decimal(12, 2)
+  sellPrice      Decimal @db.Decimal(12, 2)
+  totalCostPrice Decimal @db.Decimal(12, 2)
+  totalSellPrice Decimal @db.Decimal(12, 2)
+  profit         Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([saleItemId])
+  @@index([stockBatchId])
+  @@index([createdAt])
 }

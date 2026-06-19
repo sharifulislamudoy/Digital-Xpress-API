@@ -24,21 +24,14 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const isImage = file.mimetype.startsWith("image/");
     const isVideo = file.mimetype.startsWith("video/");
-
     if (!isImage && !isVideo) {
       return cb(new Error("Only image and video files are allowed"));
     }
-
     cb(null, true);
   },
 });
 
-const productUpload = upload.fields([
-  { name: "mainImage", maxCount: 1 },
-  { name: "hoverImage", maxCount: 1 },
-  { name: "video", maxCount: 1 },
-  { name: "extraImages", maxCount: 20 },
-]);
+const productUpload = upload.any();
 
 const productInclude = {
   category: true,
@@ -49,21 +42,15 @@ const productInclude = {
   },
 };
 
-const stockStatusLabelMap: Record<StockStatus, string> = {
-  IN_STOCK: "In stock",
-  LIMITED_STOCK: "Limited stock",
-  LOW_STOCK: "Low stock",
-  OUT_OF_STOCK: "Out of stock",
-  PRE_ORDER: "Pre-order",
-  COMING_SOON: "Coming soon",
+// ---- Local type to include name/email in user ----
+type UserWithName = {
+  id: string;
+  email: string;
+  role: string;
+  name?: string | null;
 };
 
-const purchasableStatuses = new Set<StockStatus>([
-  StockStatus.IN_STOCK,
-  StockStatus.LIMITED_STOCK,
-  StockStatus.LOW_STOCK,
-  StockStatus.PRE_ORDER,
-]);
+// ---- Helper functions ----
 
 function getStringParam(param: string | string[] | undefined) {
   if (typeof param === "string") return param;
@@ -95,25 +82,20 @@ async function createUniqueSlug(
     if (model === "product") {
       existing = await prisma.product.findUnique({ where: { slug } });
     }
-
     if (model === "category") {
       existing = await prisma.productCategory.findUnique({ where: { slug } });
     }
-
     if (model === "brand") {
       existing = await prisma.brand.findUnique({ where: { slug } });
     }
-
     if (model === "subCategory") {
       if (!categoryId) throw new Error("categoryId required for sub-category slug");
-
       existing = await prisma.productSubCategory.findUnique({
         where: { categoryId_slug: { categoryId, slug } },
       });
     }
 
     if (!existing) return slug;
-
     slug = `${baseSlug}-${counter}`;
     counter += 1;
   }
@@ -121,12 +103,10 @@ async function createUniqueSlug(
 
 function numberFromBody(value: unknown, fallback = 0) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
-
   if (typeof value === "string" && value.trim() !== "") {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
   }
-
   return fallback;
 }
 
@@ -145,108 +125,222 @@ function calculateSellingPrice(
   return costPrice + (costPrice * profitValue) / 100;
 }
 
-function getFiles(req: AuthRequest) {
-  return req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+function getFilesFromRequest(req: AuthRequest) {
+  const files = req.files as Express.Multer.File[] | undefined;
+  if (!files) return {};
+  const result: { [fieldname: string]: Express.Multer.File[] } = {};
+  for (const file of files) {
+    if (!result[file.fieldname]) result[file.fieldname] = [];
+    result[file.fieldname].push(file);
+  }
+  return result;
 }
 
 function normalizeStockStatus(value: unknown): StockStatus {
-  if (
-    value === StockStatus.IN_STOCK ||
-    value === StockStatus.LIMITED_STOCK ||
-    value === StockStatus.LOW_STOCK ||
-    value === StockStatus.OUT_OF_STOCK ||
-    value === StockStatus.PRE_ORDER ||
-    value === StockStatus.COMING_SOON
-  ) {
-    return value;
+  const validStatuses = Object.values(StockStatus);
+  if (typeof value === "string" && validStatuses.includes(value as StockStatus)) {
+    return value as StockStatus;
   }
-
   return StockStatus.IN_STOCK;
 }
 
 function canAddToCartByStatus(stockStatus: StockStatus) {
-  return purchasableStatuses.has(stockStatus);
+  const purchasable = new Set<StockStatus>([
+    StockStatus.IN_STOCK,
+    StockStatus.LIMITED_STOCK,
+    StockStatus.LOW_STOCK,
+    StockStatus.PRE_ORDER,
+  ]);
+  return purchasable.has(stockStatus);
 }
 
+function parseStringArray(raw: unknown): string[] {
+  if (typeof raw === "string" && raw.trim() !== "") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((item) => typeof item === "string");
+    } catch {
+      return raw
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function parseJSON(raw: unknown): any {
+  if (typeof raw === "string" && raw.trim() !== "") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function getOptionalString(raw: unknown): string | undefined {
+  if (typeof raw === "string" && raw.trim() !== "") return raw.trim();
+  return undefined;
+}
+
+function getOptionalNumber(raw: unknown): number | undefined {
+  const num = numberFromBody(raw);
+  return num !== 0 ? num : undefined;
+}
+
+// ---- Stock visibility function ----
 function canSeeStockQuantity(req: AuthRequest) {
-  return (req.user as any)?.role === "admin";
+  return req.user?.role === "admin";
 }
 
+// ---- Auto‑generate SKU ----
+async function generateNextSku() {
+  const products = await prisma.product.findMany({
+    select: { sku: true },
+    orderBy: { sku: "asc" },
+  });
+  let maxNumber = 0;
+  for (const p of products) {
+    if (p.sku) {
+      const num = parseInt(p.sku, 10);
+      if (!isNaN(num) && num > maxNumber) maxNumber = num;
+    }
+  }
+  const next = maxNumber + 1;
+  return next.toString().padStart(4, "0");
+}
+
+const stockStatusLabelMap: Record<StockStatus, string> = {
+  IN_STOCK: "In stock",
+  LIMITED_STOCK: "Limited stock",
+  LOW_STOCK: "Low stock",
+  OUT_OF_STOCK: "Out of stock",
+  PRE_ORDER: "Pre-order",
+  COMING_SOON: "Coming soon",
+};
+
+// ---- Serialize product for API response ----
 function serializeProduct(
   product: any,
   options: { internal?: boolean; showStockQuantity?: boolean } = {}
 ) {
+  const stockStatus = normalizeStockStatus(product.stockStatus);
   const sellingPrice = Number(product.sellingPrice);
   const mrp = product.mrp ? Number(product.mrp) : sellingPrice;
-  const stockStatus = product.stockStatus || StockStatus.IN_STOCK;
   const canAddToCart = canAddToCartByStatus(stockStatus);
 
-  return {
+  const serialized: any = {
     id: product.id,
     name: product.name,
     slug: product.slug,
-
+    sku: product.sku || null,
     modelName: product.modelName,
-
     shortDescription: product.shortDescription,
     description: product.description,
-
     mrp,
     price: sellingPrice,
     sellingPrice,
-
     category: product.category,
     subCategory: product.subCategory,
     brand: product.brand,
-
     mainImageUrl: product.mainImageUrl,
+    mainImageAlt: product.mainImageAlt,
     hoverImageUrl: product.hoverImageUrl,
+    hoverImageAlt: product.hoverImageAlt,
     videoUrl: product.videoUrl,
     extraImages: product.extraImages || [],
-
     image: product.mainImageUrl,
-    hoverImage: product.hoverImageUrl,
-
+    hoverImage: product.hoverImage,
     stockStatus,
     stockStatusLabel: stockStatusLabelMap[stockStatus],
     canAddToCart,
     inStock: canAddToCart,
-
     isPublished: product.isPublished,
+    isFeatured: product.isFeatured,
+    isNewArrival: product.isNewArrival,
+    isBestSeller: product.isBestSeller,
+    isTrending: product.isTrending,
+    isRecommended: product.isRecommended,
+    isFlashSale: product.isFlashSale,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,
-
-    ...(options.showStockQuantity && {
-      stock: product.stock,
-    }),
-
-    ...(options.internal && {
-      costPrice: Number(product.costPrice),
-      profitType: product.profitType,
-      profitValue: Number(product.profitValue),
-      mainImagePublicId: product.mainImagePublicId,
-      hoverImagePublicId: product.hoverImagePublicId,
-      videoPublicId: product.videoPublicId,
-    }),
+    // Additional public fields
+    keyFeatures: product.keyFeatures || [],
+    highlights: product.highlights || [],
+    specifications: product.specifications,
+    tags: product.tags || [],
+    warrantyDuration: product.warrantyDuration,
+    warrantyDetails: product.warrantyDetails,
+    returnPolicy: product.returnPolicy,
+    replacementPolicy: product.replacementPolicy,
+    refundPolicy: product.refundPolicy,
+    deliveryInfo: product.deliveryInfo,
+    deliveryCharge: product.deliveryCharge ? Number(product.deliveryCharge) : null,
+    insideDhakaDeliveryCharge: product.insideDhakaDeliveryCharge ? Number(product.insideDhakaDeliveryCharge) : null,
+    outsideDhakaDeliveryCharge: product.outsideDhakaDeliveryCharge ? Number(product.outsideDhakaDeliveryCharge) : null,
+    deliveryTime: product.deliveryTime,
+    cashOnDelivery: product.cashOnDelivery,
+    freeDelivery: product.freeDelivery,
+    freeDeliveryMinAmount: product.freeDeliveryMinAmount ? Number(product.freeDeliveryMinAmount) : null,
+    packageIncludes: product.packageIncludes || [],
+    packageWeight: product.packageWeight,
+    packageDimensions: product.packageDimensions,
+    productCode: product.productCode,
+    barcode: product.barcode,
+    averageRating: product.averageRating ? Number(product.averageRating) : 0,
+    totalReviews: product.totalReviews || 0,
+    // SEO fields
+    seoTitle: product.seoTitle,
+    seoDescription: product.seoDescription,
+    seoKeywords: product.seoKeywords || [],
+    focusKeyword: product.focusKeyword,
+    canonicalUrl: product.canonicalUrl,
+    ogTitle: product.ogTitle,
+    ogDescription: product.ogDescription,
+    ogImage: product.ogImage,
+    metaRobots: product.metaRobots,
+    schemaJson: product.schemaJson,
   };
-}
 
-function parseRemovedExtraImageIds(raw: unknown) {
-  if (typeof raw !== "string" || raw.trim() === "") return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed.filter((item) => typeof item === "string");
-  } catch {
-    return raw
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
+  if (options.showStockQuantity) {
+    serialized.stock = product.stock;
   }
 
-  return [];
+  if (options.internal) {
+    serialized.costPrice = Number(product.costPrice);
+    serialized.profitType = product.profitType;
+    serialized.profitValue = Number(product.profitValue);
+    serialized.mainImagePublicId = product.mainImagePublicId;
+    serialized.hoverImagePublicId = product.hoverImagePublicId;
+    serialized.videoPublicId = product.videoPublicId;
+    serialized.supplierName = product.supplierName;
+    serialized.supplierPhone = product.supplierPhone;
+    serialized.supplierEmail = product.supplierEmail;
+    serialized.supplierAddress = product.supplierAddress;
+    serialized.supplierInvoiceNumber = product.supplierInvoiceNumber;
+    serialized.internalNote = product.internalNote;
+    serialized.createdById = product.createdById;
+    serialized.createdByName = product.createdByName;
+    serialized.createdByEmail = product.createdByEmail;
+    serialized.updatedById = product.updatedById;
+    serialized.updatedByName = product.updatedByName;
+    serialized.updatedByEmail = product.updatedByEmail;
+    serialized.publishedAt = product.publishedAt;
+    serialized.lowStockAlertQuantity = product.lowStockAlertQuantity;
+    serialized.soldQuantity = product.soldQuantity;
+    serialized.reservedQuantity = product.reservedQuantity;
+    serialized.viewCount = product.viewCount;
+    serialized.wishlistCount = product.wishlistCount;
+    serialized.cartCount = product.cartCount;
+    serialized.orderCount = product.orderCount;
+  }
+
+  return serialized;
 }
 
+// ---- Resolve category, sub‑category, brand ----
 async function resolveCategoryId(body: any) {
   const categoryId = typeof body.categoryId === "string" ? body.categoryId.trim() : "";
   const categoryName = typeof body.categoryName === "string" ? body.categoryName.trim() : "";
@@ -273,17 +367,13 @@ async function resolveCategoryId(body: any) {
 }
 
 async function resolveSubCategoryId(body: any, categoryId: string) {
-  const subCategoryId =
-    typeof body.subCategoryId === "string" ? body.subCategoryId.trim() : "";
-
-  const subCategoryName =
-    typeof body.subCategoryName === "string" ? body.subCategoryName.trim() : "";
+  const subCategoryId = typeof body.subCategoryId === "string" ? body.subCategoryId.trim() : "";
+  const subCategoryName = typeof body.subCategoryName === "string" ? body.subCategoryName.trim() : "";
 
   if (subCategoryId) {
     const subCategory = await prisma.productSubCategory.findUnique({
       where: { id: subCategoryId },
     });
-
     if (!subCategory) throw new Error("Sub-category not found");
     return subCategory.id;
   }
@@ -291,7 +381,6 @@ async function resolveSubCategoryId(body: any, categoryId: string) {
   if (!subCategoryName) return null;
 
   const baseSlug = slugify(subCategoryName);
-
   const existing = await prisma.productSubCategory.findUnique({
     where: { categoryId_slug: { categoryId, slug: baseSlug } },
   });
@@ -329,7 +418,6 @@ async function resolveBrandId(body: any) {
   if (existing) return existing.id;
 
   const slug = await createUniqueSlug(brandName, "brand");
-
   const created = await prisma.brand.create({
     data: { name: brandName, slug },
   });
@@ -337,7 +425,23 @@ async function resolveBrandId(body: any) {
   return created.id;
 }
 
-// Public products
+function parseRemovedExtraImageIds(raw: unknown) {
+  if (typeof raw !== "string" || raw.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((item) => typeof item === "string");
+  } catch {
+    return raw
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+// ---- Routes ----
+
+// Public products (customer view)
 router.get("/", async (req, res) => {
   try {
     const page = Math.max(numberFromBody(req.query.page, 1), 1);
@@ -412,6 +516,7 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Meta data
 router.get("/meta", async (_req, res) => {
   try {
     const [categories, brands] = await Promise.all([
@@ -442,6 +547,7 @@ router.get("/meta", async (_req, res) => {
   }
 });
 
+// Admin product list (with all fields)
 router.get("/admin", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   try {
     const products = await prisma.product.findMany({
@@ -467,9 +573,9 @@ router.get("/admin", authenticate, requireAdminOrModerator, async (req: AuthRequ
   }
 });
 
+// Admin get single product
 router.get("/admin/:id", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   const id = getStringParam(req.params.id);
-
   if (!id) {
     return res.status(400).json({
       success: false,
@@ -506,162 +612,78 @@ router.get("/admin/:id", authenticate, requireAdminOrModerator, async (req: Auth
   }
 });
 
+// ---- Category, SubCategory, Brand creation endpoints ----
 router.post("/categories", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   try {
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-
     if (!name) {
-      return res.status(400).json({
-        success: false,
-        message: "Category name is required",
-      });
+      return res.status(400).json({ success: false, message: "Category name is required" });
     }
-
     const baseSlug = slugify(name);
-    const existing = await prisma.productCategory.findUnique({
-      where: { slug: baseSlug },
-    });
-
+    const existing = await prisma.productCategory.findUnique({ where: { slug: baseSlug } });
     if (existing) {
-      return res.status(200).json({
-        success: true,
-        message: "Category already exists",
-        category: existing,
-      });
+      return res.status(200).json({ success: true, message: "Category already exists", category: existing });
     }
-
     const slug = await createUniqueSlug(name, "category");
-
-    const category = await prisma.productCategory.create({
-      data: { name, slug },
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Category created",
-      category,
-    });
+    const category = await prisma.productCategory.create({ data: { name, slug } });
+    return res.status(201).json({ success: true, message: "Category created", category });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create category",
-    });
+    return res.status(500).json({ success: false, message: "Failed to create category" });
   }
 });
 
 router.post("/sub-categories", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   try {
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-    const categoryId =
-      typeof req.body.categoryId === "string" ? req.body.categoryId.trim() : "";
-
+    const categoryId = typeof req.body.categoryId === "string" ? req.body.categoryId.trim() : "";
     if (!name) {
-      return res.status(400).json({
-        success: false,
-        message: "Sub-category name is required",
-      });
+      return res.status(400).json({ success: false, message: "Sub-category name is required" });
     }
-
     if (!categoryId) {
-      return res.status(400).json({
-        success: false,
-        message: "Category is required",
-      });
+      return res.status(400).json({ success: false, message: "Category is required" });
     }
-
     const baseSlug = slugify(name);
-
     const existing = await prisma.productSubCategory.findUnique({
-      where: {
-        categoryId_slug: {
-          categoryId,
-          slug: baseSlug,
-        },
-      },
+      where: { categoryId_slug: { categoryId, slug: baseSlug } },
     });
-
     if (existing) {
-      return res.status(200).json({
-        success: true,
-        message: "Sub-category already exists",
-        subCategory: existing,
-      });
+      return res.status(200).json({ success: true, message: "Sub-category already exists", subCategory: existing });
     }
-
     const slug = await createUniqueSlug(name, "subCategory", categoryId);
-
-    const subCategory = await prisma.productSubCategory.create({
-      data: { name, slug, categoryId },
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Sub-category created",
-      subCategory,
-    });
+    const subCategory = await prisma.productSubCategory.create({ data: { name, slug, categoryId } });
+    return res.status(201).json({ success: true, message: "Sub-category created", subCategory });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create sub-category",
-    });
+    return res.status(500).json({ success: false, message: "Failed to create sub-category" });
   }
 });
 
 router.post("/brands", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   try {
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-
     if (!name) {
-      return res.status(400).json({
-        success: false,
-        message: "Brand name is required",
-      });
+      return res.status(400).json({ success: false, message: "Brand name is required" });
     }
-
     const baseSlug = slugify(name);
-
-    const existing = await prisma.brand.findUnique({
-      where: { slug: baseSlug },
-    });
-
+    const existing = await prisma.brand.findUnique({ where: { slug: baseSlug } });
     if (existing) {
-      return res.status(200).json({
-        success: true,
-        message: "Brand already exists",
-        brand: existing,
-      });
+      return res.status(200).json({ success: true, message: "Brand already exists", brand: existing });
     }
-
     const slug = await createUniqueSlug(name, "brand");
-
-    const brand = await prisma.brand.create({
-      data: { name, slug },
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Brand created",
-      brand,
-    });
+    const brand = await prisma.brand.create({ data: { name, slug } });
+    return res.status(201).json({ success: true, message: "Brand created", brand });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to create brand",
-    });
+    return res.status(500).json({ success: false, message: "Failed to create brand" });
   }
 });
 
+// Public product detail
 router.get("/:identifier", async (req, res) => {
   const identifier = getStringParam(req.params.identifier);
-
   if (!identifier) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid product identifier",
-    });
+    return res.status(400).json({ success: false, message: "Invalid product identifier" });
   }
 
   try {
@@ -674,10 +696,7 @@ router.get("/:identifier", async (req, res) => {
     });
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
+      return res.status(404).json({ success: false, message: "Product not found" });
     }
 
     const relatedProducts = await prisma.product.findMany({
@@ -698,55 +717,32 @@ router.get("/:identifier", async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to load product",
-    });
+    return res.status(500).json({ success: false, message: "Failed to load product" });
   }
 });
 
+// ---- CREATE PRODUCT ----
 router.post("/", authenticate, requireAdminOrModerator, productUpload, async (req: AuthRequest, res) => {
   try {
-    const files = getFiles(req);
-    const mainImage = files?.mainImage?.[0];
-    const hoverImage = files?.hoverImage?.[0];
-    const video = files?.video?.[0];
-    const extraImages = files?.extraImages || [];
+    const files = getFilesFromRequest(req);
+    const mainImage = files.mainImage?.[0];
+    const hoverImage = files.hoverImage?.[0];
+    const video = files.video?.[0];
+    const extraImages = files.extraImages || [];
 
     if (!mainImage) {
-      return res.status(400).json({
-        success: false,
-        message: "Main product image is required",
-      });
+      return res.status(400).json({ success: false, message: "Main product image is required" });
     }
 
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-    const modelName =
-      typeof req.body.modelName === "string" && req.body.modelName.trim()
-        ? req.body.modelName.trim()
-        : null;
+    const modelName = getOptionalString(req.body.modelName);
+    const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
+    const shortDescription = getOptionalString(req.body.shortDescription);
+    const productCode = getOptionalString(req.body.productCode);
+    const barcode = getOptionalString(req.body.barcode);
 
-    const description =
-      typeof req.body.description === "string" ? req.body.description.trim() : "";
-
-    const shortDescription =
-      typeof req.body.shortDescription === "string" && req.body.shortDescription.trim()
-        ? req.body.shortDescription.trim()
-        : null;
-
-    if (!name) {
-      return res.status(400).json({
-        success: false,
-        message: "Product name is required",
-      });
-    }
-
-    if (!description) {
-      return res.status(400).json({
-        success: false,
-        message: "Description is required",
-      });
-    }
+    if (!name) return res.status(400).json({ success: false, message: "Product name is required" });
+    if (!description) return res.status(400).json({ success: false, message: "Description is required" });
 
     const categoryId = await resolveCategoryId(req.body);
     const subCategoryId = await resolveSubCategoryId(req.body, categoryId);
@@ -754,16 +750,29 @@ router.post("/", authenticate, requireAdminOrModerator, productUpload, async (re
 
     const mrp = numberFromBody(req.body.mrp);
     const costPrice = numberFromBody(req.body.costPrice);
-    const profitType =
-      req.body.profitType === "FIXED" ? ProfitType.FIXED : ProfitType.PERCENTAGE;
+    const profitType = req.body.profitType === "FIXED" ? ProfitType.FIXED : ProfitType.PERCENTAGE;
     const profitValue = numberFromBody(req.body.profitValue);
     const sellingPrice = calculateSellingPrice(costPrice, profitType, profitValue);
-
     const stock = Math.max(numberFromBody(req.body.stock), 0);
     const stockStatus = normalizeStockStatus(req.body.stockStatus);
     const isPublished = booleanFromBody(req.body.isPublished, true);
+    const lowStockAlertQuantity = Math.max(numberFromBody(req.body.lowStockAlertQuantity, 5), 0);
+
+    // Arrays and JSON
+    const keyFeatures = parseStringArray(req.body.keyFeatures);
+    const highlights = parseStringArray(req.body.highlights);
+    const tags = parseStringArray(req.body.tags);
+    const searchKeywords = parseStringArray(req.body.searchKeywords);
+    const packageIncludes = parseStringArray(req.body.packageIncludes);
+    const seoKeywords = parseStringArray(req.body.seoKeywords);
+    const specifications = parseJSON(req.body.specifications);
+    const schemaJson = parseJSON(req.body.schemaJson);
+
+    // Generate SKU
+    const sku = await generateNextSku();
     const slug = await createUniqueSlug(name, "product");
 
+    // Upload images/video
     const [mainUploaded, hoverUploaded, videoUploaded] = await Promise.all([
       uploadImageToCloudinary(mainImage.buffer),
       hoverImage ? uploadImageToCloudinary(hoverImage.buffer) : Promise.resolve(null),
@@ -774,46 +783,100 @@ router.post("/", authenticate, requireAdminOrModerator, productUpload, async (re
       extraImages.map((file) => uploadImageToCloudinary(file.buffer))
     );
 
-    const product = await prisma.product.create({
-      data: {
-        name,
-        slug,
-        modelName,
-        shortDescription,
-        description,
+    // Cast user to include name/email
+    const user = req.user as UserWithName | undefined;
 
-        mrp,
-        costPrice,
-        profitType,
-        profitValue,
-        sellingPrice,
-
-        stock,
-        stockStatus,
-        inStock: canAddToCartByStatus(stockStatus),
-        isPublished,
-
-        categoryId,
-        subCategoryId,
-        brandId,
-
-        mainImageUrl: mainUploaded.secure_url,
-        mainImagePublicId: mainUploaded.public_id,
-
-        hoverImageUrl: hoverUploaded?.secure_url || null,
-        hoverImagePublicId: hoverUploaded?.public_id || null,
-
-        videoUrl: videoUploaded?.secure_url || null,
-        videoPublicId: videoUploaded?.public_id || null,
-
-        extraImages: {
-          create: extraUploaded.map((img, index) => ({
-            imageUrl: img.secure_url,
-            cloudinaryPublicId: img.public_id,
-            sortOrder: index,
-          })),
-        },
+    // Build data object
+    const data: Prisma.ProductCreateInput = {
+      name,
+      slug,
+      sku,
+      modelName,
+      shortDescription,
+      description,
+      productCode,
+      barcode,
+      mrp,
+      costPrice,
+      profitType,
+      profitValue,
+      sellingPrice,
+      stock,
+      stockStatus,
+      inStock: canAddToCartByStatus(stockStatus),
+      isPublished,
+      lowStockAlertQuantity,
+      keyFeatures,
+      highlights,
+      specifications,
+      tags,
+      searchKeywords,
+      isFeatured: booleanFromBody(req.body.isFeatured, false),
+      isNewArrival: booleanFromBody(req.body.isNewArrival, false),
+      isBestSeller: booleanFromBody(req.body.isBestSeller, false),
+      isTrending: booleanFromBody(req.body.isTrending, false),
+      isRecommended: booleanFromBody(req.body.isRecommended, false),
+      isFlashSale: booleanFromBody(req.body.isFlashSale, false),
+      mainImageUrl: mainUploaded.secure_url,
+      mainImagePublicId: mainUploaded.public_id,
+      mainImageAlt: getOptionalString(req.body.mainImageAlt),
+      hoverImageUrl: hoverUploaded?.secure_url || null,
+      hoverImagePublicId: hoverUploaded?.public_id || null,
+      hoverImageAlt: getOptionalString(req.body.hoverImageAlt),
+      videoUrl: videoUploaded?.secure_url || null,
+      videoPublicId: videoUploaded?.public_id || null,
+      category: { connect: { id: categoryId } },
+      brand: { connect: { id: brandId } },
+      subCategory: subCategoryId ? { connect: { id: subCategoryId } } : undefined,
+      extraImages: {
+        create: extraUploaded.map((img, index) => ({
+          imageUrl: img.secure_url,
+          cloudinaryPublicId: img.public_id,
+          sortOrder: index,
+        })),
       },
+      // Additional fields
+      warrantyDuration: getOptionalString(req.body.warrantyDuration),
+      warrantyDetails: getOptionalString(req.body.warrantyDetails),
+      returnPolicy: getOptionalString(req.body.returnPolicy),
+      replacementPolicy: getOptionalString(req.body.replacementPolicy),
+      refundPolicy: getOptionalString(req.body.refundPolicy),
+      deliveryInfo: getOptionalString(req.body.deliveryInfo),
+      deliveryCharge: getOptionalNumber(req.body.deliveryCharge),
+      insideDhakaDeliveryCharge: getOptionalNumber(req.body.insideDhakaDeliveryCharge),
+      outsideDhakaDeliveryCharge: getOptionalNumber(req.body.outsideDhakaDeliveryCharge),
+      deliveryTime: getOptionalString(req.body.deliveryTime),
+      cashOnDelivery: booleanFromBody(req.body.cashOnDelivery, true),
+      freeDelivery: booleanFromBody(req.body.freeDelivery, false),
+      freeDeliveryMinAmount: getOptionalNumber(req.body.freeDeliveryMinAmount),
+      packageIncludes,
+      packageWeight: getOptionalString(req.body.packageWeight),
+      packageDimensions: getOptionalString(req.body.packageDimensions),
+      supplierName: getOptionalString(req.body.supplierName),
+      supplierPhone: getOptionalString(req.body.supplierPhone),
+      supplierEmail: getOptionalString(req.body.supplierEmail),
+      supplierAddress: getOptionalString(req.body.supplierAddress),
+      supplierInvoiceNumber: getOptionalString(req.body.supplierInvoiceNumber),
+      internalNote: getOptionalString(req.body.internalNote),
+      seoTitle: getOptionalString(req.body.seoTitle),
+      seoDescription: getOptionalString(req.body.seoDescription),
+      seoKeywords,
+      focusKeyword: getOptionalString(req.body.focusKeyword),
+      canonicalUrl: getOptionalString(req.body.canonicalUrl),
+      ogTitle: getOptionalString(req.body.ogTitle),
+      ogDescription: getOptionalString(req.body.ogDescription),
+      ogImage: getOptionalString(req.body.ogImage),
+      metaRobots: getOptionalString(req.body.metaRobots) || "index,follow",
+      schemaJson,
+      // Audit fields
+      createdById: user?.id,
+      createdByName: user?.name || null,
+      createdByEmail: user?.email || null,
+      publishedAt: isPublished ? new Date() : undefined,
+    };
+
+    const product = await prisma.product.create({
+      data,
       include: productInclude,
     });
 
@@ -834,14 +897,11 @@ router.post("/", authenticate, requireAdminOrModerator, productUpload, async (re
   }
 });
 
+// ---- UPDATE PRODUCT ----
 router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async (req: AuthRequest, res) => {
   const id = getStringParam(req.params.id);
-
   if (!id) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid product ID",
-    });
+    return res.status(400).json({ success: false, message: "Invalid product ID" });
   }
 
   try {
@@ -851,24 +911,21 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
     });
 
     if (!existing) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
+      return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const files = getFiles(req);
-    const mainImage = files?.mainImage?.[0];
-    const hoverImage = files?.hoverImage?.[0];
-    const video = files?.video?.[0];
-    const extraImages = files?.extraImages || [];
+    const files = getFilesFromRequest(req);
+    const mainImage = files.mainImage?.[0];
+    const hoverImage = files.hoverImage?.[0];
+    const video = files.video?.[0];
+    const extraImages = files.extraImages || [];
 
     const data: Prisma.ProductUpdateInput = {};
 
+    // Basic text fields
     if (typeof req.body.name === "string" && req.body.name.trim()) {
       const nextName = req.body.name.trim();
       data.name = nextName;
-
       if (nextName !== existing.name) {
         data.slug = await createUniqueSlug(nextName, "product");
       }
@@ -877,28 +934,33 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
     if (typeof req.body.modelName === "string") {
       data.modelName = req.body.modelName.trim() || null;
     }
-
     if (typeof req.body.description === "string") {
       data.description = req.body.description.trim();
     }
-
     if (typeof req.body.shortDescription === "string") {
       data.shortDescription = req.body.shortDescription.trim() || null;
     }
+    if (typeof req.body.productCode === "string") {
+      data.productCode = req.body.productCode.trim() || null;
+    }
+    if (typeof req.body.barcode === "string") {
+      data.barcode = req.body.barcode.trim() || null;
+    }
 
+    // Resolve relations
     const categoryId = await resolveCategoryId(req.body);
     const subCategoryId = await resolveSubCategoryId(req.body, categoryId);
     const brandId = await resolveBrandId(req.body);
 
     data.category = { connect: { id: categoryId } };
     data.brand = { connect: { id: brandId } };
-
     if (subCategoryId) {
       data.subCategory = { connect: { id: subCategoryId } };
     } else {
       data.subCategory = { disconnect: true };
     }
 
+    // Pricing
     if (typeof req.body.mrp !== "undefined") {
       data.mrp = numberFromBody(req.body.mrp);
     }
@@ -907,33 +969,25 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
     const hasProfitType = typeof req.body.profitType !== "undefined";
     const hasProfitValue = typeof req.body.profitValue !== "undefined";
 
-    const nextCostPrice = hasCost
-      ? numberFromBody(req.body.costPrice)
-      : Number(existing.costPrice);
-
+    const nextCostPrice = hasCost ? numberFromBody(req.body.costPrice) : Number(existing.costPrice);
     const nextProfitType = hasProfitType
-      ? req.body.profitType === "FIXED"
-        ? ProfitType.FIXED
-        : ProfitType.PERCENTAGE
+      ? req.body.profitType === "FIXED" ? ProfitType.FIXED : ProfitType.PERCENTAGE
       : existing.profitType;
-
-    const nextProfitValue = hasProfitValue
-      ? numberFromBody(req.body.profitValue)
-      : Number(existing.profitValue);
+    const nextProfitValue = hasProfitValue ? numberFromBody(req.body.profitValue) : Number(existing.profitValue);
 
     if (hasCost || hasProfitType || hasProfitValue) {
       data.costPrice = nextCostPrice;
       data.profitType = nextProfitType;
       data.profitValue = nextProfitValue;
-      data.sellingPrice = calculateSellingPrice(
-        nextCostPrice,
-        nextProfitType,
-        nextProfitValue
-      );
+      data.sellingPrice = calculateSellingPrice(nextCostPrice, nextProfitType, nextProfitValue);
     }
 
+    // Stock
     if (typeof req.body.stock !== "undefined") {
       data.stock = Math.max(numberFromBody(req.body.stock), 0);
+    }
+    if (typeof req.body.lowStockAlertQuantity !== "undefined") {
+      data.lowStockAlertQuantity = Math.max(numberFromBody(req.body.lowStockAlertQuantity, 5), 0);
     }
 
     if (typeof req.body.stockStatus !== "undefined") {
@@ -942,42 +996,132 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
       data.inStock = canAddToCartByStatus(stockStatus);
     }
 
+    // Boolean flags
     if (typeof req.body.isPublished !== "undefined") {
-      data.isPublished = booleanFromBody(req.body.isPublished, existing.isPublished);
+      const isPublished = booleanFromBody(req.body.isPublished, existing.isPublished);
+      data.isPublished = isPublished;
+      if (isPublished && !existing.publishedAt) {
+        data.publishedAt = new Date();
+      }
     }
 
+    const booleanFields = [
+      "isFeatured",
+      "isNewArrival",
+      "isBestSeller",
+      "isTrending",
+      "isRecommended",
+      "isFlashSale",
+      "cashOnDelivery",
+      "freeDelivery",
+    ] as const;
+
+    for (const field of booleanFields) {
+      if (typeof req.body[field] !== "undefined") {
+        data[field] = booleanFromBody(req.body[field], existing[field] as boolean);
+      }
+    }
+
+    // Arrays and JSON
+    const arrayFields = [
+      "keyFeatures",
+      "highlights",
+      "tags",
+      "searchKeywords",
+      "packageIncludes",
+      "seoKeywords",
+    ] as const;
+
+    for (const field of arrayFields) {
+      if (typeof req.body[field] !== "undefined") {
+        data[field] = parseStringArray(req.body[field]);
+      }
+    }
+
+    if (typeof req.body.specifications !== "undefined") {
+      data.specifications = parseJSON(req.body.specifications);
+    }
+    if (typeof req.body.schemaJson !== "undefined") {
+      data.schemaJson = parseJSON(req.body.schemaJson);
+    }
+
+    // Optional string fields
+    const optionalStringFields = [
+      "warrantyDuration",
+      "warrantyDetails",
+      "returnPolicy",
+      "replacementPolicy",
+      "refundPolicy",
+      "deliveryInfo",
+      "deliveryTime",
+      "packageWeight",
+      "packageDimensions",
+      "supplierName",
+      "supplierPhone",
+      "supplierEmail",
+      "supplierAddress",
+      "supplierInvoiceNumber",
+      "internalNote",
+      "seoTitle",
+      "seoDescription",
+      "focusKeyword",
+      "canonicalUrl",
+      "ogTitle",
+      "ogDescription",
+      "ogImage",
+      "metaRobots",
+    ] as const;
+
+    for (const field of optionalStringFields) {
+      if (typeof req.body[field] !== "undefined") {
+        data[field] = getOptionalString(req.body[field]);
+      }
+    }
+
+    // Optional number fields
+    const optionalNumberFields = [
+      "deliveryCharge",
+      "insideDhakaDeliveryCharge",
+      "outsideDhakaDeliveryCharge",
+      "freeDeliveryMinAmount",
+    ] as const;
+
+    for (const field of optionalNumberFields) {
+      if (typeof req.body[field] !== "undefined") {
+        data[field] = getOptionalNumber(req.body[field]);
+      }
+    }
+
+    // Images / video
     if (mainImage) {
       const uploaded = await uploadImageToCloudinary(mainImage.buffer);
       await deleteFromCloudinary(existing.mainImagePublicId);
-
       data.mainImageUrl = uploaded.secure_url;
       data.mainImagePublicId = uploaded.public_id;
+      data.mainImageAlt = getOptionalString(req.body.mainImageAlt);
     }
 
     if (hoverImage) {
       const uploaded = await uploadImageToCloudinary(hoverImage.buffer);
-
       if (existing.hoverImagePublicId) {
         await deleteFromCloudinary(existing.hoverImagePublicId);
       }
-
       data.hoverImageUrl = uploaded.secure_url;
       data.hoverImagePublicId = uploaded.public_id;
+      data.hoverImageAlt = getOptionalString(req.body.hoverImageAlt);
     }
 
     if (video) {
       const uploaded = await uploadVideoToCloudinary(video.buffer);
-
       if (existing.videoPublicId) {
         await deleteFromCloudinary(existing.videoPublicId, "video");
       }
-
       data.videoUrl = uploaded.secure_url;
       data.videoPublicId = uploaded.public_id;
     }
 
+    // Remove extra images
     const removedExtraImageIds = parseRemovedExtraImageIds(req.body.removeExtraImageIds);
-
     if (removedExtraImageIds.length > 0) {
       const imagesToRemove = await prisma.productImage.findMany({
         where: {
@@ -998,11 +1142,18 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
       });
     }
 
+    // Update product - cast user
+    const user = req.user as UserWithName | undefined;
+    data.updatedById = user?.id;
+    data.updatedByName = user?.name || null;
+    data.updatedByEmail = user?.email || null;
+
     await prisma.product.update({
       where: { id },
       data,
     });
 
+    // Add new extra images
     if (extraImages.length > 0) {
       const currentCount = await prisma.productImage.count({
         where: { productId: id },
@@ -1027,6 +1178,10 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
       include: productInclude,
     });
 
+    if (!finalProduct) {
+      return res.status(404).json({ success: false, message: "Product not found after update" });
+    }
+
     return res.json({
       success: true,
       message: "Product updated successfully",
@@ -1044,14 +1199,11 @@ router.patch("/:id", authenticate, requireAdminOrModerator, productUpload, async
   }
 });
 
+// ---- DELETE PRODUCT ----
 router.delete("/:id", authenticate, requireAdminOrModerator, async (req: AuthRequest, res) => {
   const id = getStringParam(req.params.id);
-
   if (!id) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid product ID",
-    });
+    return res.status(400).json({ success: false, message: "Invalid product ID" });
   }
 
   try {
@@ -1061,27 +1213,16 @@ router.delete("/:id", authenticate, requireAdminOrModerator, async (req: AuthReq
     });
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
+      return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    await prisma.product.delete({
-      where: { id },
-    });
+    await prisma.product.delete({ where: { id } });
 
     await Promise.all([
       deleteFromCloudinary(product.mainImagePublicId),
-      product.hoverImagePublicId
-        ? deleteFromCloudinary(product.hoverImagePublicId)
-        : Promise.resolve(),
-      product.videoPublicId
-        ? deleteFromCloudinary(product.videoPublicId, "video")
-        : Promise.resolve(),
-      ...product.extraImages.map((img) =>
-        deleteFromCloudinary(img.cloudinaryPublicId)
-      ),
+      product.hoverImagePublicId ? deleteFromCloudinary(product.hoverImagePublicId) : Promise.resolve(),
+      product.videoPublicId ? deleteFromCloudinary(product.videoPublicId, "video") : Promise.resolve(),
+      ...product.extraImages.map((img) => deleteFromCloudinary(img.cloudinaryPublicId)),
     ]);
 
     return res.json({

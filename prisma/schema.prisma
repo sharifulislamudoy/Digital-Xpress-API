@@ -13,9 +13,9 @@ enum Role {
   customer
 }
 
-enum ProfitType {
-  FIXED
-  PERCENTAGE
+enum ProductType {
+  single
+  combo
 }
 
 enum StockStatus {
@@ -151,6 +151,8 @@ model Product {
   name String
   slug String @unique
 
+  productType ProductType @default(single)
+
   sku         String? @unique
   productCode String? @unique
   barcode     String? @unique
@@ -170,10 +172,8 @@ model Product {
 
   mrp Decimal @db.Decimal(12, 2)
 
-  costPrice    Decimal    @db.Decimal(12, 2)
-  profitType   ProfitType @default(PERCENTAGE)
-  profitValue  Decimal    @db.Decimal(12, 2)
-  sellingPrice Decimal    @db.Decimal(12, 2)
+  costPrice    Decimal? @db.Decimal(12, 2)
+  sellingPrice Decimal  @db.Decimal(12, 2)
 
   stock                 Int         @default(0)
   stockStatus           StockStatus @default(IN_STOCK)
@@ -181,8 +181,7 @@ model Product {
   soldQuantity          Int         @default(0)
   reservedQuantity      Int         @default(0)
 
-  inStock Boolean @default(true)
-
+  inStock     Boolean @default(true)
   isPublished Boolean @default(true)
 
   isFeatured    Boolean @default(false)
@@ -213,15 +212,7 @@ model Product {
   brand   Brand  @relation(fields: [brandId], references: [id])
 
   extraImages ProductImage[]
-  variants    ProductVariant[]
-
-  /**
-   * FIFO inventory relations
-   * stockBatches = purchase/stock entry history
-   * saleItems = selling history for this product
-   */
-  stockBatches StockBatch[]
-  saleItems    SaleItem[]
+  sizeChart   SizeChart?
 
   warrantyDuration String?
   warrantyDetails  String?
@@ -282,6 +273,7 @@ model Product {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  @@index([productType])
   @@index([categoryId])
   @@index([subCategoryId])
   @@index([brandId])
@@ -313,219 +305,31 @@ model ProductImage {
   @@index([sortOrder])
 }
 
-model ProductVariant {
-  id        String  @id @default(cuid())
-  productId String
+model SizeChart {
+  id String @id @default(cuid())
+
+  productId String  @unique
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  sku String? @unique
+  name        String
+  title       String?
+  description String?
 
-  color   String?
-  size    String?
-  ram     String?
-  storage String?
+  unit String @default("inch")
 
-  mrp Decimal? @db.Decimal(12, 2)
+  chartData Json
 
-  costPrice    Decimal?   @db.Decimal(12, 2)
-  profitType   ProfitType @default(PERCENTAGE)
-  profitValue  Decimal?   @db.Decimal(12, 2)
-  sellingPrice Decimal?   @db.Decimal(12, 2)
+  imageUrl           String?
+  cloudinaryPublicId String?
 
-  stock       Int         @default(0)
-  stockStatus StockStatus @default(IN_STOCK)
-
-  imageUrl      String?
-  imagePublicId String?
-
+  note      String?
   isActive  Boolean @default(true)
   sortOrder Int     @default(0)
 
-  /**
-   * FIFO inventory relations for variant based stock
-   */
-  stockBatches StockBatch[]
-  saleItems    SaleItem[]
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([productId])
-  @@index([sku])
-  @@index([stockStatus])
   @@index([isActive])
-}
-
-/**
- * FIFO Stock Batch
- * Every time you purchase/add stock, create one StockBatch.
- * Example:
- * Product: Mouse
- * Batch 1: 10 pcs, cost 300
- * Batch 2: 20 pcs, cost 350
- * During sale, system will consume oldest batch first:
- * orderBy: createdAt asc
- */
-model StockBatch {
-  id String @id @default(cuid())
-
-  productId String
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-
-  /**
-   * Optional variant support.
-   * If product has no variant, keep variantId null.
-   * If stock is for a specific variant, save variantId.
-   */
-  variantId String?
-  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
-
-  purchaseQty  Int
-  remainingQty Int
-
-  costPrice Decimal @db.Decimal(12, 2)
-
-  supplierName          String?
-  supplierPhone         String?
-  supplierEmail         String?
-  supplierAddress       String?
-  supplierInvoiceNumber String?
-
-  note String?
-
-  createdById    String?
-  createdByName  String?
-  createdByEmail String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  saleItemBatches SaleItemBatch[]
-
-  @@index([productId])
-  @@index([variantId])
-  @@index([remainingQty])
-  @@index([createdAt])
-  @@index([productId, createdAt])
-  @@index([productId, variantId, createdAt])
-}
-
-/**
- * Sale main table
- * One sale/order invoice will create one Sale.
- */
-model Sale {
-  id String @id @default(cuid())
-
-  invoiceNumber String? @unique
-
-  customerName    String?
-  customerMobile  String?
-  customerEmail   String?
-  customerAddress String?
-
-  totalAmount Decimal @default(0) @db.Decimal(12, 2)
-  totalCost   Decimal @default(0) @db.Decimal(12, 2)
-  totalProfit Decimal @default(0) @db.Decimal(12, 2)
-
-  discountAmount Decimal @default(0) @db.Decimal(12, 2)
-  deliveryCharge Decimal @default(0) @db.Decimal(12, 2)
-
-  paidAmount Decimal @default(0) @db.Decimal(12, 2)
-  dueAmount  Decimal @default(0) @db.Decimal(12, 2)
-
-  note String?
-
-  createdById    String?
-  createdByName  String?
-  createdByEmail String?
-
-  items SaleItem[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([invoiceNumber])
-  @@index([customerMobile])
-  @@index([customerEmail])
-  @@index([createdAt])
-}
-
-/**
- * Sale item table
- * One Sale can contain multiple SaleItem.
- * Example:
- * Sale #1:
- * - Mouse 12 pcs
- * - Keyboard 2 pcs
- */
-model SaleItem {
-  id String @id @default(cuid())
-
-  saleId String
-  sale   Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
-
-  productId String
-  product   Product @relation(fields: [productId], references: [id])
-
-  /**
-   * Optional variant support.
-   */
-  variantId String?
-  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
-
-  quantity Int
-
-  sellPrice      Decimal @db.Decimal(12, 2)
-  totalSellPrice Decimal @db.Decimal(12, 2)
-
-  totalCostPrice Decimal @default(0) @db.Decimal(12, 2)
-  profit         Decimal @default(0) @db.Decimal(12, 2)
-
-  createdAt DateTime @default(now())
-
-  /**
-   * Exact FIFO batch consumption history
-   */
-  batchUsages SaleItemBatch[]
-
-  @@index([saleId])
-  @@index([productId])
-  @@index([variantId])
-  @@index([createdAt])
-}
-
-/**
- * Sale item batch table
- * This table keeps exact FIFO calculation history.
- * Example:
- * Customer bought 12 Mouse.
- * Batch 1 had 10 pcs at cost 300
- * Batch 2 had 20 pcs at cost 350
- * SaleItemBatch:
- * - batch 1, quantity 10, cost 300
- * - batch 2, quantity 2, cost 350
- */
-model SaleItemBatch {
-  id String @id @default(cuid())
-
-  saleItemId String
-  saleItem   SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
-
-  stockBatchId String
-  stockBatch   StockBatch @relation(fields: [stockBatchId], references: [id])
-
-  quantity Int
-
-  costPrice      Decimal @db.Decimal(12, 2)
-  sellPrice      Decimal @db.Decimal(12, 2)
-  totalCostPrice Decimal @db.Decimal(12, 2)
-  totalSellPrice Decimal @db.Decimal(12, 2)
-  profit         Decimal @db.Decimal(12, 2)
-
-  createdAt DateTime @default(now())
-
-  @@index([saleItemId])
-  @@index([stockBatchId])
-  @@index([createdAt])
+  @@index([sortOrder])
 }

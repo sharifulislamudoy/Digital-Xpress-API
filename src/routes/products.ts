@@ -1,6 +1,6 @@
 // src/routes/product.routes.ts
 
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
 import { Prisma, ProductType, StockStatus } from "@prisma/client";
 import { prisma } from "../lib/prisma";
@@ -37,6 +37,49 @@ const upload = multer({
 
 const productUpload = upload.any();
 
+const reviewImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 10,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      return cb(new Error("Only image files are allowed for review photos"));
+    }
+
+    cb(null, true);
+  },
+}).array("images", 10);
+
+function handleReviewImageUpload(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  reviewImageUpload(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const message =
+        error.code === "LIMIT_FILE_SIZE"
+          ? "Each review photo must be 5MB or smaller"
+          : error.code === "LIMIT_FILE_COUNT" || error.code === "LIMIT_UNEXPECTED_FILE"
+            ? "You can upload maximum 10 review photos"
+            : error.message;
+
+      return res.status(400).json({ success: false, message });
+    }
+
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to upload review photos",
+      });
+    }
+
+    next();
+  });
+}
+
 type UploadedFilesMap = Record<string, Express.Multer.File[]>;
 
 type SerializeOptions = {
@@ -52,6 +95,15 @@ const productInclude = Prisma.validator<Prisma.ProductInclude>()({
     orderBy: { sortOrder: "asc" },
   },
   sizeChart: true,
+  reviews: {
+    where: { isPublished: true },
+    orderBy: { createdAt: "desc" },
+    include: {
+      images: {
+        orderBy: { sortOrder: "asc" },
+      },
+    },
+  },
 });
 
 type ProductWithRelations = Prisma.ProductGetPayload<{
@@ -448,6 +500,84 @@ async function resolveBrandId(body: any) {
   return brand.id;
 }
 
+function serializeReview(review: {
+  id: string;
+  productId: string;
+  userId: string | null;
+  userName: string | null;
+  userEmail: string;
+  rating: number;
+  comment: string;
+  isPublished: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  images?: {
+    id: string;
+    reviewId: string;
+    imageUrl: string;
+    cloudinaryPublicId: string;
+    altText: string | null;
+    sortOrder: number;
+    createdAt: Date;
+  }[];
+}) {
+  return {
+    id: review.id,
+    productId: review.productId,
+    userId: review.userId,
+    userName: review.userName,
+    userEmail: review.userEmail,
+    rating: review.rating,
+    comment: review.comment,
+    isPublished: review.isPublished,
+    createdAt: review.createdAt,
+    updatedAt: review.updatedAt,
+    images: (review.images || []).map((image) => ({
+      id: image.id,
+      reviewId: image.reviewId,
+      imageUrl: image.imageUrl,
+      cloudinaryPublicId: image.cloudinaryPublicId,
+      altText: image.altText,
+      sortOrder: image.sortOrder,
+      createdAt: image.createdAt,
+    })),
+  };
+}
+
+function requiredReviewRating(value: unknown) {
+  const rating = Math.trunc(numberFromBody(value, 0));
+
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    throw new Error("Rating must be between 1 and 5");
+  }
+
+  return rating;
+}
+
+function sanitizeReviewComment(value: unknown) {
+  const comment = requiredString(value, "Review comment");
+
+  if (comment.length < 3) {
+    throw new Error("Review comment must be at least 3 characters");
+  }
+
+  if (comment.length > 1000) {
+    throw new Error("Review comment cannot be longer than 1000 characters");
+  }
+
+  return comment;
+}
+
+async function findPublishedProductBySlugOrId(slugOrId: string) {
+  return prisma.product.findFirst({
+    where: {
+      isPublished: true,
+      OR: [{ slug: slugOrId }, { id: slugOrId }],
+    },
+    include: productInclude,
+  });
+}
+
 function serializeSizeChart(sizeChart: ProductWithRelations["sizeChart"] | null) {
   if (!sizeChart) return null;
 
@@ -573,6 +703,7 @@ function serializeProduct(product: ProductWithRelations, options: SerializeOptio
     orderCount: product.orderCount,
     averageRating: Number(product.averageRating || 0),
     totalReviews: product.totalReviews,
+    reviews: (product.reviews || []).map((review) => serializeReview(review)),
 
     publishedAt: product.publishedAt,
     createdAt: product.createdAt,
@@ -1416,59 +1547,269 @@ router.patch(
   }
 );
 
-router.delete("/:id", authenticate, requireAdminOrModerator, async (req, res) => {
-  try {
-    const productId = getStringParam(req.params.id);
+function getReviewImageFiles(req: AuthRequest) {
+  const files = req.files as Express.Multer.File[] | undefined;
+  return Array.isArray(files) ? files : [];
+}
 
-    if (!productId) {
-      return res.status(400).json({ success: false, message: "Product ID is required" });
+async function uploadReviewImages(files: Express.Multer.File[]) {
+  return Promise.all(
+    files.map((file) =>
+      uploadImageToCloudinary(file.buffer, "digital-xpress/products/reviews")
+    )
+  );
+}
+
+async function cleanupUploadedReviewImages(
+  images: { public_id: string }[]
+) {
+  await Promise.allSettled(
+    images.map((image) => deleteFromCloudinary(image.public_id, "image"))
+  );
+}
+
+router.get("/:slugOrId/reviews", async (req, res) => {
+  try {
+    const slugOrId = getStringParam(req.params.slugOrId);
+
+    if (!slugOrId) {
+      return res.status(400).json({ success: false, message: "Product slug or ID is required" });
     }
 
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
-      include: productInclude,
-    });
+    const product = await findPublishedProductBySlugOrId(slugOrId);
 
     if (!product) {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const deleteJobs: Promise<any>[] = [];
-
-    if (product.mainImagePublicId) {
-      deleteJobs.push(deleteFromCloudinary(product.mainImagePublicId, "image"));
-    }
-
-    if (product.hoverImagePublicId) {
-      deleteJobs.push(deleteFromCloudinary(product.hoverImagePublicId, "image"));
-    }
-
-    if (product.videoPublicId) {
-      deleteJobs.push(deleteFromCloudinary(product.videoPublicId, "video"));
-    }
-
-    for (const image of product.extraImages || []) {
-      deleteJobs.push(deleteFromCloudinary(image.cloudinaryPublicId, "image"));
-    }
-
-    if (product.sizeChart?.cloudinaryPublicId) {
-      deleteJobs.push(deleteFromCloudinary(product.sizeChart.cloudinaryPublicId, "image"));
-    }
-
-    await Promise.all(deleteJobs);
-
-    await prisma.product.delete({
-      where: { id: product.id },
+    const reviews = await prisma.productReview.findMany({
+      where: {
+        productId: product.id,
+        isPublished: true,
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        images: {
+          orderBy: { sortOrder: "asc" },
+        },
+      },
     });
 
     return res.json({
       success: true,
-      message: "Product deleted successfully",
+      productId: product.id,
+      averageRating: Number(product.averageRating || 0),
+      totalReviews: product.totalReviews,
+      reviews: reviews.map((review) => serializeReview(review)),
     });
   } catch (error) {
-    return sendError(res, error, "Failed to delete product");
+    return sendError(res, error, "Failed to fetch reviews");
   }
 });
+
+router.post(
+  "/:slugOrId/reviews",
+  authenticate,
+  handleReviewImageUpload,
+  async (req: AuthRequest, res) => {
+    const uploadedReviewImages: { secure_url: string; public_id: string }[] = [];
+
+    try {
+      const slugOrId = getStringParam(req.params.slugOrId);
+
+      if (!slugOrId) {
+        return res.status(400).json({
+          success: false,
+          message: "Product slug or ID is required",
+        });
+      }
+
+      const authEmail = req.user?.email;
+
+      if (!authEmail) {
+        return res.status(401).json({
+          success: false,
+          message: "Login required to submit a review",
+        });
+      }
+
+      const product = await findPublishedProductBySlugOrId(slugOrId);
+
+      if (!product) {
+        return res.status(404).json({ success: false, message: "Product not found" });
+      }
+
+      const rating = requiredReviewRating(req.body.rating);
+      const comment = sanitizeReviewComment(req.body.comment);
+      const reviewImageFiles = getReviewImageFiles(req);
+
+      if (reviewImageFiles.length > 10) {
+        return res.status(400).json({
+          success: false,
+          message: "You can upload maximum 10 review photos",
+        });
+      }
+
+      const authUserId = req.user?.id || null;
+
+      const dbUser = await prisma.user.findFirst({
+        where: {
+          OR: [
+            ...(authUserId ? [{ id: authUserId }] : []),
+            { email: authEmail },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      });
+
+      const userId = dbUser?.id || authUserId;
+      const userName = dbUser?.name || optionalString(req.body.userName) || "Customer";
+      const userEmail = dbUser?.email || authEmail;
+
+      uploadedReviewImages.push(...(await uploadReviewImages(reviewImageFiles)));
+
+      const result = await prisma.$transaction(async (tx) => {
+        const existingReview = await tx.productReview.findUnique({
+          where: {
+            productId_userEmail: {
+              productId: product.id,
+              userEmail,
+            },
+          },
+          include: {
+            images: true,
+          },
+        });
+
+        const review = await tx.productReview.upsert({
+          where: {
+            productId_userEmail: {
+              productId: product.id,
+              userEmail,
+            },
+          },
+          update: {
+            rating,
+            comment,
+            userId,
+            userName,
+            isPublished: true,
+          },
+          create: {
+            productId: product.id,
+            userId,
+            userName,
+            userEmail,
+            rating,
+            comment,
+            isPublished: true,
+          },
+        });
+
+        if (uploadedReviewImages.length > 0) {
+          await tx.productReviewImage.deleteMany({
+            where: { reviewId: review.id },
+          });
+
+          await tx.productReviewImage.createMany({
+            data: uploadedReviewImages.map((image, index) => ({
+              reviewId: review.id,
+              imageUrl: image.secure_url,
+              cloudinaryPublicId: image.public_id,
+              altText: `${product.name} review photo ${index + 1}`,
+              sortOrder: index,
+            })),
+          });
+        }
+
+        const aggregate = await tx.productReview.aggregate({
+          where: {
+            productId: product.id,
+            isPublished: true,
+          },
+          _avg: { rating: true },
+          _count: { _all: true },
+        });
+
+        const averageRating = Number((aggregate._avg.rating || 0).toFixed(2));
+        const totalReviews = aggregate._count._all;
+
+        await tx.product.update({
+          where: { id: product.id },
+          data: {
+            averageRating: new Prisma.Decimal(averageRating),
+            totalReviews,
+          },
+        });
+
+        const savedReview = await tx.productReview.findUniqueOrThrow({
+          where: { id: review.id },
+          include: {
+            images: {
+              orderBy: { sortOrder: "asc" },
+            },
+          },
+        });
+
+        const reviews = await tx.productReview.findMany({
+          where: {
+            productId: product.id,
+            isPublished: true,
+          },
+          orderBy: { createdAt: "desc" },
+          include: {
+            images: {
+              orderBy: { sortOrder: "asc" },
+            },
+          },
+        });
+
+        return {
+          review: savedReview,
+          reviews,
+          averageRating,
+          totalReviews,
+          oldImagesToDelete:
+            uploadedReviewImages.length > 0 ? existingReview?.images || [] : [],
+        };
+      });
+
+      if (result.oldImagesToDelete.length > 0) {
+        await Promise.allSettled(
+          result.oldImagesToDelete.map((image) =>
+            deleteFromCloudinary(image.cloudinaryPublicId, "image")
+          )
+        );
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: "Review saved successfully",
+        review: serializeReview(result.review),
+        reviews: result.reviews.map((review) => serializeReview(review)),
+        averageRating: result.averageRating,
+        totalReviews: result.totalReviews,
+      });
+    } catch (error) {
+      if (uploadedReviewImages.length > 0) {
+        await cleanupUploadedReviewImages(uploadedReviewImages);
+      }
+
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return res.status(409).json({
+          success: false,
+          message: "You have already reviewed this product",
+        });
+      }
+
+      return sendError(res, error, "Failed to save review");
+    }
+  }
+);
 
 router.get("/:slugOrId", async (req, res) => {
   try {
@@ -1478,13 +1819,7 @@ router.get("/:slugOrId", async (req, res) => {
       return res.status(400).json({ success: false, message: "Product slug or ID is required" });
     }
 
-    const product = await prisma.product.findFirst({
-      where: {
-        isPublished: true,
-        OR: [{ slug: slugOrId }, { id: slugOrId }],
-      },
-      include: productInclude,
-    });
+    const product = await findPublishedProductBySlugOrId(slugOrId);
 
     if (!product) {
       return res.status(404).json({ success: false, message: "Product not found" });

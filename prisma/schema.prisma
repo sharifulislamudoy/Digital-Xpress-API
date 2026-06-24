@@ -253,6 +253,8 @@ model Product {
 
   metaRobots String @default("index,follow")
 
+  reviews ProductReview[]
+
   schemaJson Json?
 
   viewCount     Int     @default(0)
@@ -287,6 +289,40 @@ model Product {
   @@index([updatedAt])
   @@index([slug])
   @@index([sku])
+}
+
+model ProductReview {
+  id          String   @id @default(cuid())
+  productId   String
+  userId      String?
+  userName    String?
+  userEmail   String
+  rating      Int
+  comment     String   @db.Text
+  isPublished Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images  ProductReviewImage[]
+
+  @@unique([productId, userEmail])
+  @@index([productId])
+  @@index([userEmail])
+}
+
+model ProductReviewImage {
+  id                 String        @id @default(cuid())
+  reviewId           String
+  review             ProductReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  imageUrl           String
+  cloudinaryPublicId String
+  altText            String?
+  sortOrder          Int           @default(0)
+  createdAt          DateTime      @default(now())
+
+  @@index([reviewId])
+  @@index([sortOrder])
 }
 
 model ProductImage {

@@ -95,20 +95,23 @@ const productInclude = Prisma.validator<Prisma.ProductInclude>()({
     orderBy: { sortOrder: "asc" },
   },
   sizeChart: true,
-  reviews: {
-    where: { isPublished: true },
-    orderBy: { createdAt: "desc" },
-    include: {
-      images: {
-        orderBy: { sortOrder: "asc" },
-      },
-    },
+});
+
+const productReviewInclude = Prisma.validator<Prisma.ProductReviewInclude>()({
+  images: {
+    orderBy: { sortOrder: "asc" },
   },
 });
 
+type ProductReviewWithImages = Prisma.ProductReviewGetPayload<{
+  include: typeof productReviewInclude;
+}>;
+
 type ProductWithRelations = Prisma.ProductGetPayload<{
   include: typeof productInclude;
-}>;
+}> & {
+  reviews?: ProductReviewWithImages[];
+};
 
 const stockStatusLabelMap: Record<StockStatus, string> = {
   IN_STOCK: "In stock",
@@ -568,14 +571,36 @@ function sanitizeReviewComment(value: unknown) {
   return comment;
 }
 
-async function findPublishedProductBySlugOrId(slugOrId: string) {
-  return prisma.product.findFirst({
+async function getPublishedProductReviews(productId: string) {
+  return prisma.productReview.findMany({
+    where: {
+      productId,
+      isPublished: true,
+    },
+    orderBy: { createdAt: "desc" },
+    include: productReviewInclude,
+  });
+}
+
+async function findPublishedProductBySlugOrId(
+  slugOrId: string
+): Promise<ProductWithRelations | null> {
+  const product = await prisma.product.findFirst({
     where: {
       isPublished: true,
       OR: [{ slug: slugOrId }, { id: slugOrId }],
     },
     include: productInclude,
   });
+
+  if (!product) return null;
+
+  const reviews = await getPublishedProductReviews(product.id);
+
+  return {
+    ...product,
+    reviews,
+  };
 }
 
 function serializeSizeChart(sizeChart: ProductWithRelations["sizeChart"] | null) {
@@ -703,7 +728,7 @@ function serializeProduct(product: ProductWithRelations, options: SerializeOptio
     orderCount: product.orderCount,
     averageRating: Number(product.averageRating || 0),
     totalReviews: product.totalReviews,
-    reviews: (product.reviews || []).map((review) => serializeReview(review)),
+    reviews: (product.reviews ?? []).map((review) => serializeReview(review)),
 
     publishedAt: product.publishedAt,
     createdAt: product.createdAt,

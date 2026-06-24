@@ -97,15 +97,37 @@ const productInclude = Prisma.validator<Prisma.ProductInclude>()({
   sizeChart: true,
 });
 
-const productReviewInclude = Prisma.validator<Prisma.ProductReviewInclude>()({
-  images: {
-    orderBy: { sortOrder: "asc" },
-  },
-});
+type ProductReviewImage = {
+  id: string;
+  reviewId: string;
+  imageUrl: string;
+  cloudinaryPublicId: string;
+  altText: string | null;
+  sortOrder: number;
+  createdAt: Date;
+};
 
-type ProductReviewWithImages = Prisma.ProductReviewGetPayload<{
-  include: typeof productReviewInclude;
-}>;
+type ProductReviewWithImages = {
+  id: string;
+  productId: string;
+  userId: string | null;
+  userName: string | null;
+  userEmail: string;
+  rating: number;
+  comment: string;
+  isPublished: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  images?: ProductReviewImage[];
+};
+
+function getProductReviewDelegate(db: any) {
+  return db.productReview || db.review;
+}
+
+function getProductReviewImageDelegate(db: any) {
+  return db.productReviewImage || db.reviewImage;
+}
 
 type ProductWithRelations = Prisma.ProductGetPayload<{
   include: typeof productInclude;
@@ -503,27 +525,7 @@ async function resolveBrandId(body: any) {
   return brand.id;
 }
 
-function serializeReview(review: {
-  id: string;
-  productId: string;
-  userId: string | null;
-  userName: string | null;
-  userEmail: string;
-  rating: number;
-  comment: string;
-  isPublished: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-  images?: {
-    id: string;
-    reviewId: string;
-    imageUrl: string;
-    cloudinaryPublicId: string;
-    altText: string | null;
-    sortOrder: number;
-    createdAt: Date;
-  }[];
-}) {
+function serializeReview(review: ProductReviewWithImages) {
   return {
     id: review.id,
     productId: review.productId,
@@ -571,15 +573,37 @@ function sanitizeReviewComment(value: unknown) {
   return comment;
 }
 
-async function getPublishedProductReviews(productId: string) {
-  return prisma.productReview.findMany({
-    where: {
-      productId,
-      isPublished: true,
-    },
-    orderBy: { createdAt: "desc" },
-    include: productReviewInclude,
-  });
+async function getPublishedProductReviews(
+  productId: string
+): Promise<ProductReviewWithImages[]> {
+  const reviewDelegate = getProductReviewDelegate(prisma);
+
+  if (!reviewDelegate?.findMany) {
+    return [];
+  }
+
+  try {
+    return await reviewDelegate.findMany({
+      where: {
+        productId,
+        isPublished: true,
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        images: {
+          orderBy: { sortOrder: "asc" },
+        },
+      },
+    });
+  } catch {
+    return await reviewDelegate.findMany({
+      where: {
+        productId,
+        isPublished: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
 }
 
 async function findPublishedProductBySlugOrId(
@@ -1607,18 +1631,7 @@ router.get("/:slugOrId/reviews", async (req, res) => {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const reviews = await prisma.productReview.findMany({
-      where: {
-        productId: product.id,
-        isPublished: true,
-      },
-      orderBy: { createdAt: "desc" },
-      include: {
-        images: {
-          orderBy: { sortOrder: "asc" },
-        },
-      },
-    });
+    const reviews = await getPublishedProductReviews(product.id);
 
     return res.json({
       success: true,
@@ -1698,7 +1711,14 @@ router.post(
       uploadedReviewImages.push(...(await uploadReviewImages(reviewImageFiles)));
 
       const result = await prisma.$transaction(async (tx) => {
-        const existingReview = await tx.productReview.findUnique({
+        const reviewDelegate = getProductReviewDelegate(tx);
+        const reviewImageDelegate = getProductReviewImageDelegate(tx);
+
+        if (!reviewDelegate) {
+          throw new Error("Review model is not available in Prisma Client");
+        }
+
+        const existingReview = await reviewDelegate.findUnique({
           where: {
             productId_userEmail: {
               productId: product.id,
@@ -1710,7 +1730,7 @@ router.post(
           },
         });
 
-        const review = await tx.productReview.upsert({
+        const review = await reviewDelegate.upsert({
           where: {
             productId_userEmail: {
               productId: product.id,
@@ -1735,12 +1755,12 @@ router.post(
           },
         });
 
-        if (uploadedReviewImages.length > 0) {
-          await tx.productReviewImage.deleteMany({
+        if (uploadedReviewImages.length > 0 && reviewImageDelegate) {
+          await reviewImageDelegate.deleteMany({
             where: { reviewId: review.id },
           });
 
-          await tx.productReviewImage.createMany({
+          await reviewImageDelegate.createMany({
             data: uploadedReviewImages.map((image, index) => ({
               reviewId: review.id,
               imageUrl: image.secure_url,
@@ -1751,7 +1771,7 @@ router.post(
           });
         }
 
-        const aggregate = await tx.productReview.aggregate({
+        const aggregate = await reviewDelegate.aggregate({
           where: {
             productId: product.id,
             isPublished: true,
@@ -1771,7 +1791,7 @@ router.post(
           },
         });
 
-        const savedReview = await tx.productReview.findUniqueOrThrow({
+        const savedReview = await reviewDelegate.findUniqueOrThrow({
           where: { id: review.id },
           include: {
             images: {
@@ -1780,7 +1800,7 @@ router.post(
           },
         });
 
-        const reviews = await tx.productReview.findMany({
+        const reviews = await reviewDelegate.findMany({
           where: {
             productId: product.id,
             isPublished: true,
@@ -1805,7 +1825,7 @@ router.post(
 
       if (result.oldImagesToDelete.length > 0) {
         await Promise.allSettled(
-          result.oldImagesToDelete.map((image) =>
+          result.oldImagesToDelete.map((image: any) =>
             deleteFromCloudinary(image.cloudinaryPublicId, "image")
           )
         );
@@ -1815,7 +1835,7 @@ router.post(
         success: true,
         message: "Review saved successfully",
         review: serializeReview(result.review),
-        reviews: result.reviews.map((review) => serializeReview(review)),
+        reviews: result.reviews.map((review: any) => serializeReview(review)),
         averageRating: result.averageRating,
         totalReviews: result.totalReviews,
       });

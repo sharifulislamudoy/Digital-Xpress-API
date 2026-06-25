@@ -3,6 +3,7 @@ import authRoutes from "./auth";
 import usersRoutes from "./users";
 import bannerRoutes from "./banner";
 import productRoutes from "./products";
+import orderRoutes from "./orders";
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use("/auth", authRoutes);
 router.use("/users", usersRoutes);
 router.use("/banners", bannerRoutes);
 router.use("/products", productRoutes);
+router.use("/orders", orderRoutes);
 
 export default router;

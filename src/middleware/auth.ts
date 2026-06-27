@@ -7,6 +7,7 @@ export interface AuthRequest extends Request {
     id: string;
     email: string;
     role: string;
+    name?: string | null;
   };
 }
 
@@ -27,21 +28,21 @@ export const authenticate = async (
       email: string;
       role: string;
     };
-    
+
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: { id: true, email: true, role: true, isBanned: true },
     });
-    
+
     if (!user) {
       return res.status(401).json({ success: false, message: "User not found" });
     }
-    
+
     // ✅ Reject banned users
     if (user.isBanned) {
       return res.status(403).json({ success: false, message: "Account is banned" });
     }
-    
+
     req.user = {
       id: user.id,
       email: user.email || "",

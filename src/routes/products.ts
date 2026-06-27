@@ -211,6 +211,14 @@ function intFromBody(value: unknown, fallback = 0) {
   return Math.max(Math.trunc(numberFromBody(value, fallback)), 0);
 }
 
+function signedIntFromBody(value: unknown, fallback = 0) {
+  const parsed = numberFromBody(value, fallback);
+
+  if (!Number.isFinite(parsed)) return fallback;
+
+  return Math.trunc(parsed);
+}
+
 function booleanFromBody(value: unknown, fallback = false) {
   if (typeof value === "boolean") return value;
 
@@ -305,15 +313,26 @@ function clampRating(value: unknown) {
   return Math.min(Math.max(rating, 0), 5);
 }
 
-const purchasableStockStatuses: readonly StockStatus[] = [
-  StockStatus.IN_STOCK,
-  StockStatus.LIMITED_STOCK,
-  StockStatus.LOW_STOCK,
-  StockStatus.PRE_ORDER,
+const orderBlockingStockStatuses: readonly StockStatus[] = [
+  StockStatus.OUT_OF_STOCK,
+  StockStatus.COMING_SOON,
 ];
 
 function canAddToCartByStatus(stockStatus: StockStatus) {
-  return purchasableStockStatuses.includes(stockStatus);
+  // Stock quantity 0/negative is allowed.
+  // Only manual unavailable statuses should block cart/order.
+  return !orderBlockingStockStatuses.includes(stockStatus);
+}
+
+function canProductBeOrdered(product: {
+  stockStatus: StockStatus;
+  inStock?: boolean | null;
+  isPublished?: boolean | null;
+}) {
+  if (product.isPublished === false) return false;
+  if (product.inStock === false) return false;
+
+  return canAddToCartByStatus(product.stockStatus);
 }
 
 function getFilesFromRequest(req: AuthRequest): UploadedFilesMap {
@@ -680,7 +699,11 @@ function serializeProduct(product: ProductWithRelations, options: SerializeOptio
     stockStatus,
     stockStatusLabel: stockStatusLabelMap[stockStatus],
     inStock: product.inStock,
-    canAddToCart: canAddToCartByStatus(stockStatus),
+    canAddToCart: canProductBeOrdered({
+      stockStatus,
+      inStock: product.inStock,
+      isPublished: product.isPublished,
+    }),
 
     isPublished: product.isPublished,
     isFeatured: product.isFeatured,
@@ -817,7 +840,7 @@ function buildProductData(body: any, args: { categoryId: string; subCategoryId: 
     costPrice,
     sellingPrice: requiredNumberFromBody(body.sellingPrice, "Selling price"),
 
-    stock: intFromBody(body.stock, 0),
+    stock: signedIntFromBody(body.stock, 0),
     stockStatus,
     lowStockAlertQuantity: intFromBody(body.lowStockAlertQuantity, 5),
     soldQuantity: intFromBody(body.soldQuantity, 0),

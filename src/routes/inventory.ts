@@ -1,5 +1,9 @@
 import { Router, type Response } from "express";
-import { Prisma, InventoryMovementType } from "@prisma/client";
+import {
+  Prisma,
+  InventoryMovementType,
+  StockStatus,
+} from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import {
   authenticate,
@@ -16,6 +20,17 @@ import {
 } from "../lib/inventory";
 
 const router = Router();
+
+const INVENTORY_SETTINGS_KEY = "inventory_settings";
+const RESET_CONFIRM_TEXT = "delete my store";
+
+type InventorySettings = {
+  autoStockOutEnabled: boolean;
+};
+
+const DEFAULT_INVENTORY_SETTINGS: InventorySettings = {
+  autoStockOutEnabled: false,
+};
 
 function sendError(res: Response, error: unknown, fallback = "Server error") {
   console.error(error);
@@ -39,14 +54,17 @@ function optionalString(value: unknown, maxLength = 300) {
 
 function intFromBody(value: unknown, fieldName: string) {
   const parsed = Math.trunc(Number(value));
+
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${fieldName} must be greater than 0`);
   }
+
   return parsed;
 }
 
 function parseDate(value: unknown) {
   if (typeof value !== "string" || !value.trim()) return null;
+
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -57,6 +75,25 @@ function actorFromReq(req: AuthRequest) {
     name: req.user?.name || null,
     email: req.user?.email || null,
   };
+}
+
+function getUserRole(req: AuthRequest) {
+  return String((req.user as any)?.role || "").toLowerCase();
+}
+
+function isAdmin(req: AuthRequest) {
+  return getUserRole(req) === "admin";
+}
+
+function denyIfNotAdmin(req: AuthRequest, res: Response) {
+  if (isAdmin(req)) return false;
+
+  res.status(403).json({
+    success: false,
+    message: "Only admin can manage this inventory feature",
+  });
+
+  return true;
 }
 
 function serializeBatch(batch: any) {
@@ -84,7 +121,8 @@ function serializeInventoryProduct(product: any) {
 
   const stockValue = decimalToNumber(product.stockValue);
   const stock = Number(product.stock || 0);
-  const averageCost = stock > 0 ? stockValue / stock : decimalToNumber(product.averageCost);
+  const averageCost =
+    stock > 0 ? stockValue / stock : decimalToNumber(product.averageCost);
   const sellingPrice = decimalToNumber(product.sellingPrice);
   const estimatedProfitPerUnit = sellingPrice - averageCost;
 
@@ -101,12 +139,158 @@ function serializeInventoryProduct(product: any) {
   };
 }
 
+function parseInventorySettings(value: unknown): InventorySettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return DEFAULT_INVENTORY_SETTINGS;
+  }
+
+  const data = value as Record<string, unknown>;
+
+  return {
+    autoStockOutEnabled: Boolean(data.autoStockOutEnabled),
+  };
+}
+
+function serializeSettings(row: {
+  id: string;
+  key: string;
+  value: Prisma.JsonValue;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  const settings = parseInventorySettings(row.value);
+
+  return {
+    id: row.id,
+    key: row.key,
+    autoStockOutEnabled: settings.autoStockOutEnabled,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function getInventorySettingsRow(
+  client: typeof prisma | Prisma.TransactionClient = prisma
+) {
+  return client.storeSetting.upsert({
+    where: {
+      key: INVENTORY_SETTINGS_KEY,
+    },
+    update: {},
+    create: {
+      key: INVENTORY_SETTINGS_KEY,
+      value: DEFAULT_INVENTORY_SETTINGS,
+    },
+  });
+}
+
+async function isAutoStockOutEnabled(
+  client: typeof prisma | Prisma.TransactionClient = prisma
+) {
+  const row = await getInventorySettingsRow(client);
+  const settings = parseInventorySettings(row.value);
+  return settings.autoStockOutEnabled;
+}
+
+async function updateInventorySettings(
+  client: Prisma.TransactionClient,
+  nextSettings: InventorySettings
+) {
+  return client.storeSetting.upsert({
+    where: {
+      key: INVENTORY_SETTINGS_KEY,
+    },
+    update: {
+      value: nextSettings,
+    },
+    create: {
+      key: INVENTORY_SETTINGS_KEY,
+      value: nextSettings,
+    },
+  });
+}
+
+async function applyAutoStockOutToZeroStockProducts(
+  client: Prisma.TransactionClient
+) {
+  const result = await client.product.updateMany({
+    where: {
+      stock: {
+        lte: 0,
+      },
+    },
+    data: {
+      stockStatus: StockStatus.OUT_OF_STOCK,
+      inStock: false,
+    },
+  });
+
+  return result.count;
+}
+
+async function syncProductStatusWhenAutoStockOutEnabled(
+  client: Prisma.TransactionClient,
+  productId: string
+) {
+  const product = await client.product.findUnique({
+    where: {
+      id: productId,
+    },
+    select: {
+      stock: true,
+      stockStatus: true,
+      lowStockAlertQuantity: true,
+    },
+  });
+
+  if (!product) return;
+
+  const nextStatus =
+    product.stock <= 0
+      ? StockStatus.OUT_OF_STOCK
+      : getStockStatusFromQuantity(
+          product.stock,
+          product.stockStatus,
+          product.lowStockAlertQuantity
+        );
+
+  await client.product.update({
+    where: {
+      id: productId,
+    },
+    data: {
+      stockStatus: nextStatus,
+      inStock: nextStatus !== StockStatus.OUT_OF_STOCK && product.stock > 0,
+    },
+  });
+}
+
+async function restoreManualProductStatus(
+  client: Prisma.TransactionClient,
+  productId: string,
+  previousStatus: StockStatus,
+  previousInStock: boolean
+) {
+  await client.product.update({
+    where: {
+      id: productId,
+    },
+    data: {
+      stockStatus: previousStatus,
+      inStock: previousInStock,
+    },
+  });
+}
+
 async function consumeStockForAdjustment(
   tx: Prisma.TransactionClient,
   input: {
     productId: string;
     quantity: number;
-    type: Extract<InventoryMovementType, "ADJUSTMENT_OUT" | "DAMAGE" | "LOSS">;
+    type: Extract<
+      InventoryMovementType,
+      "ADJUSTMENT_OUT" | "DAMAGE" | "LOSS"
+    >;
     reason: string;
     actor: ReturnType<typeof actorFromReq>;
   }
@@ -116,7 +300,9 @@ async function consumeStockForAdjustment(
   const batches = await tx.inventoryBatch.findMany({
     where: {
       productId: input.productId,
-      remainingQuantity: { gt: 0 },
+      remainingQuantity: {
+        gt: 0,
+      },
     },
     orderBy: [{ purchaseDate: "asc" }, { createdAt: "asc" }],
   });
@@ -129,9 +315,13 @@ async function consumeStockForAdjustment(
     const totalCost = Number((unitCostPrice * usedQty).toFixed(2));
 
     await tx.inventoryBatch.update({
-      where: { id: batch.id },
+      where: {
+        id: batch.id,
+      },
       data: {
-        remainingQuantity: { decrement: usedQty },
+        remainingQuantity: {
+          decrement: usedQty,
+        },
       },
     });
 
@@ -160,13 +350,147 @@ async function consumeStockForAdjustment(
 }
 
 router.get(
+  "/settings",
+  authenticate,
+  requireAdminOrModerator,
+  async (req: AuthRequest, res) => {
+    try {
+      if (denyIfNotAdmin(req, res)) return;
+
+      const row = await getInventorySettingsRow();
+
+      return res.json({
+        success: true,
+        settings: serializeSettings(row),
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to load inventory settings");
+    }
+  }
+);
+
+router.patch(
+  "/settings/auto-stock-out",
+  authenticate,
+  requireAdminOrModerator,
+  async (req: AuthRequest, res) => {
+    try {
+      if (denyIfNotAdmin(req, res)) return;
+
+      if (typeof req.body.enabled !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "enabled must be true or false",
+        });
+      }
+
+      const enabled = Boolean(req.body.enabled);
+
+      const result = await prisma.$transaction(async (tx) => {
+        const row = await updateInventorySettings(tx, {
+          autoStockOutEnabled: enabled,
+        });
+
+        let syncedProducts = 0;
+
+        if (enabled) {
+          syncedProducts = await applyAutoStockOutToZeroStockProducts(tx);
+        }
+
+        return {
+          row,
+          syncedProducts,
+        };
+      });
+
+      return res.json({
+        success: true,
+        message: enabled
+          ? "Auto Stock Out enabled successfully"
+          : "Auto Stock Out disabled successfully",
+        settings: serializeSettings(result.row),
+        syncedProducts: result.syncedProducts,
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to update auto stock out setting");
+    }
+  }
+);
+
+router.patch(
+  "/reset-stock",
+  authenticate,
+  requireAdminOrModerator,
+  async (req: AuthRequest, res) => {
+    try {
+      if (denyIfNotAdmin(req, res)) return;
+
+      const confirmText =
+        typeof req.body.confirmText === "string"
+          ? req.body.confirmText.trim()
+          : "";
+
+      if (confirmText !== RESET_CONFIRM_TEXT) {
+        return res.status(400).json({
+          success: false,
+          message: `Type ${RESET_CONFIRM_TEXT} exactly to reset stock`,
+        });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const autoStockOutEnabled = await isAutoStockOutEnabled(tx);
+
+        const batchResult = await tx.inventoryBatch.updateMany({
+          data: {
+            remainingQuantity: 0,
+          },
+        });
+
+        const productResetData: Prisma.ProductUpdateManyMutationInput = {
+          stock: 0,
+          reservedQuantity: 0,
+          averageCost: 0,
+          stockValue: 0,
+          lastPurchaseCost: null,
+        };
+
+        if (autoStockOutEnabled) {
+          productResetData.stockStatus = StockStatus.OUT_OF_STOCK;
+          productResetData.inStock = false;
+        }
+
+        const productResult = await tx.product.updateMany({
+          data: productResetData,
+        });
+
+        return {
+          productsReset: productResult.count,
+          batchesReset: batchResult.count,
+          autoStockOutEnabled,
+        };
+      });
+
+      return res.json({
+        success: true,
+        message: "All product stock reset successfully",
+        ...result,
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to reset stock");
+    }
+  }
+);
+
+router.get(
   "/products",
   authenticate,
   requireAdminOrModerator,
   async (req: AuthRequest, res) => {
     try {
-      const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
-      const status = typeof req.query.status === "string" ? req.query.status : "all";
+      const search =
+        typeof req.query.search === "string" ? req.query.search.trim() : "";
+      const status =
+        typeof req.query.status === "string" ? req.query.status : "all";
       const page = Math.max(Number(req.query.page || 1), 1);
       const limit = Math.min(Math.max(Number(req.query.limit || 25), 1), 100);
       const skip = (page - 1) * limit;
@@ -176,11 +500,38 @@ router.get(
         ...(search
           ? {
               OR: [
-                { name: { contains: search, mode: "insensitive" } },
-                { sku: { contains: search, mode: "insensitive" } },
-                { productCode: { contains: search, mode: "insensitive" } },
-                { modelName: { contains: search, mode: "insensitive" } },
-                { brand: { name: { contains: search, mode: "insensitive" } } },
+                {
+                  name: {
+                    contains: search,
+                    mode: "insensitive",
+                  },
+                },
+                {
+                  sku: {
+                    contains: search,
+                    mode: "insensitive",
+                  },
+                },
+                {
+                  productCode: {
+                    contains: search,
+                    mode: "insensitive",
+                  },
+                },
+                {
+                  modelName: {
+                    contains: search,
+                    mode: "insensitive",
+                  },
+                },
+                {
+                  brand: {
+                    name: {
+                      contains: search,
+                      mode: "insensitive",
+                    },
+                  },
+                },
               ],
             }
           : {}),
@@ -193,16 +544,24 @@ router.get(
             brand: true,
             category: true,
             inventoryBatches: {
-              where: { remainingQuantity: { gt: 0 } },
+              where: {
+                remainingQuantity: {
+                  gt: 0,
+                },
+              },
               orderBy: [{ purchaseDate: "asc" }, { createdAt: "asc" }],
               take: 5,
             },
           },
-          orderBy: { updatedAt: "desc" },
+          orderBy: {
+            updatedAt: "desc",
+          },
           skip,
           take: limit,
         }),
-        prisma.product.count({ where }),
+        prisma.product.count({
+          where,
+        }),
       ]);
 
       return res.json({
@@ -230,7 +589,9 @@ router.get(
       const productId = requiredString(req.params.productId, "Product id");
 
       const product = await prisma.product.findUnique({
-        where: { id: productId },
+        where: {
+          id: productId,
+        },
         include: {
           brand: true,
           category: true,
@@ -239,14 +600,19 @@ router.get(
             orderBy: [{ purchaseDate: "desc" }, { createdAt: "desc" }],
           },
           inventoryMovements: {
-            orderBy: { createdAt: "desc" },
+            orderBy: {
+              createdAt: "desc",
+            },
             take: 100,
           },
         },
       });
 
       if (!product) {
-        return res.status(404).json({ success: false, message: "Product not found" });
+        return res.status(404).json({
+          success: false,
+          message: "Product not found",
+        });
       }
 
       return res.json({
@@ -279,21 +645,55 @@ router.post(
       }
 
       const batch = await prisma.$transaction(async (tx) => {
-        return createPurchaseBatch(tx, {
+        const productBeforeUpdate = await tx.product.findUnique({
+          where: {
+            id: productId,
+          },
+          select: {
+            stockStatus: true,
+            inStock: true,
+          },
+        });
+
+        if (!productBeforeUpdate) {
+          throw new Error("Product not found");
+        }
+
+        const autoStockOutEnabled = await isAutoStockOutEnabled(tx);
+
+        const createdBatch = await createPurchaseBatch(tx, {
           productId,
           quantity,
           unitCostPrice,
           mrp: req.body.mrp === undefined ? null : toMoney(req.body.mrp),
           sellingPrice:
-            req.body.sellingPrice === undefined ? null : toMoney(req.body.sellingPrice),
+            req.body.sellingPrice === undefined
+              ? null
+              : toMoney(req.body.sellingPrice),
           supplierName: optionalString(req.body.supplierName, 120),
           supplierPhone: optionalString(req.body.supplierPhone, 30),
-          supplierInvoiceNumber: optionalString(req.body.supplierInvoiceNumber, 120),
+          supplierInvoiceNumber: optionalString(
+            req.body.supplierInvoiceNumber,
+            120
+          ),
           purchaseDate: parseDate(req.body.purchaseDate),
           note: optionalString(req.body.note, 400),
           actor: actorFromReq(req),
           updateProductPrice: Boolean(req.body.updateProductPrice),
         });
+
+        if (autoStockOutEnabled) {
+          await syncProductStatusWhenAutoStockOutEnabled(tx, productId);
+        } else {
+          await restoreManualProductStatus(
+            tx,
+            productId,
+            productBeforeUpdate.stockStatus,
+            productBeforeUpdate.inStock
+          );
+        }
+
+        return createdBatch;
       });
 
       return res.status(201).json({
@@ -302,8 +702,13 @@ router.post(
         batch: serializeBatch(batch),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to add purchase stock";
-      return res.status(400).json({ success: false, message });
+      const message =
+        error instanceof Error ? error.message : "Failed to add purchase stock";
+
+      return res.status(400).json({
+        success: false,
+        message,
+      });
     }
   }
 );
@@ -317,26 +722,34 @@ router.patch(
       const productId = requiredString(req.params.productId, "Product id");
       const rawType = requiredString(req.body.type, "Adjustment type");
       const quantity = intFromBody(req.body.quantity, "Quantity");
-      const reason = optionalString(req.body.reason, 400) || "Manual stock adjustment";
+      const reason =
+        optionalString(req.body.reason, 400) || "Manual stock adjustment";
       const actor = actorFromReq(req);
 
       const product = await prisma.product.findUnique({
-        where: { id: productId },
+        where: {
+          id: productId,
+        },
         select: {
           id: true,
-          stock: true,
           stockStatus: true,
-          lowStockAlertQuantity: true,
+          inStock: true,
         },
       });
 
       if (!product) {
-        return res.status(404).json({ success: false, message: "Product not found" });
+        return res.status(404).json({
+          success: false,
+          message: "Product not found",
+        });
       }
 
       await prisma.$transaction(async (tx) => {
+        const autoStockOutEnabled = await isAutoStockOutEnabled(tx);
+
         if (rawType === "ADJUSTMENT_IN") {
           const unitCostPrice = toMoney(req.body.unitCostPrice);
+
           if (unitCostPrice <= 0) {
             throw new Error("Unit cost price is required for stock increase");
           }
@@ -349,10 +762,23 @@ router.patch(
             actor,
             updateProductPrice: Boolean(req.body.updateProductPrice),
           });
+
+          if (autoStockOutEnabled) {
+            await syncProductStatusWhenAutoStockOutEnabled(tx, productId);
+          } else {
+            await restoreManualProductStatus(
+              tx,
+              productId,
+              product.stockStatus,
+              product.inStock
+            );
+          }
+
           return;
         }
 
         const allowedOutTypes = ["ADJUSTMENT_OUT", "DAMAGE", "LOSS"];
+
         if (!allowedOutTypes.includes(rawType)) {
           throw new Error("Invalid adjustment type");
         }
@@ -360,44 +786,39 @@ router.patch(
         await consumeStockForAdjustment(tx, {
           productId,
           quantity,
-          type: rawType as Extract<InventoryMovementType, "ADJUSTMENT_OUT" | "DAMAGE" | "LOSS">,
+          type: rawType as Extract<
+            InventoryMovementType,
+            "ADJUSTMENT_OUT" | "DAMAGE" | "LOSS"
+          >,
           reason,
           actor,
         });
 
         await tx.product.update({
-          where: { id: productId },
+          where: {
+            id: productId,
+          },
           data: {
-            stock: { decrement: quantity },
-          },
-        });
-
-        const updatedProduct = await tx.product.findUnique({
-          where: { id: productId },
-          select: {
-            stock: true,
-            stockStatus: true,
-            lowStockAlertQuantity: true,
-          },
-        });
-
-        if (updatedProduct) {
-          const nextStatus = getStockStatusFromQuantity(
-            updatedProduct.stock,
-            updatedProduct.stockStatus,
-            updatedProduct.lowStockAlertQuantity
-          );
-
-          await tx.product.update({
-            where: { id: productId },
-            data: {
-              stockStatus: nextStatus,
-              inStock: nextStatus !== "OUT_OF_STOCK" && updatedProduct.stock > 0,
+            stock: {
+              decrement: quantity,
             },
-          });
-        }
+          },
+        });
 
-        await refreshProductInventorySummary(tx, productId, { keepManualStatus: true });
+        await refreshProductInventorySummary(tx, productId, {
+          keepManualStatus: true,
+        });
+
+        if (autoStockOutEnabled) {
+          await syncProductStatusWhenAutoStockOutEnabled(tx, productId);
+        } else {
+          await restoreManualProductStatus(
+            tx,
+            productId,
+            product.stockStatus,
+            product.inStock
+          );
+        }
       });
 
       return res.json({
@@ -405,8 +826,13 @@ router.patch(
         message: "Stock adjusted successfully",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to adjust stock";
-      return res.status(400).json({ success: false, message });
+      const message =
+        error instanceof Error ? error.message : "Failed to adjust stock";
+
+      return res.status(400).json({
+        success: false,
+        message,
+      });
     }
   }
 );
@@ -417,8 +843,12 @@ router.get(
   requireAdminOrModerator,
   async (req, res) => {
     try {
-      const productId = typeof req.query.productId === "string" ? req.query.productId : undefined;
-      const type = typeof req.query.type === "string" ? req.query.type : undefined;
+      const productId =
+        typeof req.query.productId === "string"
+          ? req.query.productId
+          : undefined;
+      const type =
+        typeof req.query.type === "string" ? req.query.type : undefined;
       const page = Math.max(Number(req.query.page || 1), 1);
       const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 200);
       const skip = (page - 1) * limit;
@@ -442,11 +872,15 @@ router.get(
             },
             batch: true,
           },
-          orderBy: { createdAt: "desc" },
+          orderBy: {
+            createdAt: "desc",
+          },
           skip,
           take: limit,
         }),
-        prisma.inventoryMovement.count({ where }),
+        prisma.inventoryMovement.count({
+          where,
+        }),
       ]);
 
       return res.json({
@@ -474,15 +908,23 @@ router.get(
       const products = await prisma.product.findMany({
         where: {
           OR: [
-            { stockStatus: "LOW_STOCK" },
-            { stockStatus: "OUT_OF_STOCK" },
+            {
+              stockStatus: StockStatus.LOW_STOCK,
+            },
+            {
+              stockStatus: StockStatus.OUT_OF_STOCK,
+            },
           ],
         },
         include: {
           brand: true,
           category: true,
           inventoryBatches: {
-            where: { remainingQuantity: { gt: 0 } },
+            where: {
+              remainingQuantity: {
+                gt: 0,
+              },
+            },
             orderBy: [{ purchaseDate: "asc" }, { createdAt: "asc" }],
             take: 5,
           },

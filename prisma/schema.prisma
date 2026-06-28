@@ -128,6 +128,13 @@ model ProductCategory {
   name String
   slug String @unique
 
+  description String?
+  imageUrl    String?
+  imageCloudinaryPublicId String?
+  iconSvg     String?
+  sortOrder   Int     @default(0)
+  isPublished Boolean @default(true)
+
   seoTitle       String?
   seoDescription String?
   seoKeywords    String[] @default([])
@@ -139,6 +146,8 @@ model ProductCategory {
   updatedAt DateTime @updatedAt
 
   @@index([slug])
+  @@index([isPublished])
+  @@index([sortOrder])
 }
 
 model ProductSubCategory {
@@ -147,6 +156,13 @@ model ProductSubCategory {
   slug       String
   categoryId String
   category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  description String?
+  imageUrl    String?
+  imageCloudinaryPublicId String?
+  iconSvg     String?
+  sortOrder   Int     @default(0)
+  isPublished Boolean @default(true)
 
   seoTitle       String?
   seoDescription String?
@@ -160,6 +176,8 @@ model ProductSubCategory {
   @@unique([categoryId, slug])
   @@index([categoryId])
   @@index([slug])
+  @@index([isPublished])
+  @@index([sortOrder])
 }
 
 model Brand {

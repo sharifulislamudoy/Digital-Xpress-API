@@ -714,28 +714,34 @@ export async function restoreInventoryForOrder(
   });
 }
 
+export const FIXED_PACKAGING_COST = 20;
+
 export function calculateNetProfit(input: {
   totalAmount: number;
   deliveryCharge: number;
-  discountAmount: number;
   productCostTotal: number;
   actualCourierCost?: number;
   packagingCost?: number;
-  paymentFee?: number;
-  otherCost?: number;
 }) {
-  const grossProfit = roundMoney(input.totalAmount - input.productCostTotal);
+  /**
+   * Simple Digital Xpress formula:
+   * net profit = selling total - product cost + customer delivery charge
+   *              - courier company cost - fixed packaging cost
+   *
+   * Profit report will use this only for delivered and returned orders.
+   */
+  const productSalesProfit = roundMoney(input.totalAmount - input.productCostTotal);
+  const packagingCost =
+    input.packagingCost === undefined ? FIXED_PACKAGING_COST : toMoney(input.packagingCost);
+
   const netProfit = roundMoney(
-    grossProfit +
-      input.deliveryCharge -
-      input.discountAmount -
+    productSalesProfit +
+      toMoney(input.deliveryCharge) -
       toMoney(input.actualCourierCost) -
-      toMoney(input.packagingCost) -
-      toMoney(input.paymentFee) -
-      toMoney(input.otherCost),
+      packagingCost,
   );
 
-  return { grossProfit, netProfit };
+  return { grossProfit: productSalesProfit, netProfit };
 }
 
 export async function recalculateOrderProfitById(
@@ -762,14 +768,11 @@ export async function recalculateOrderProfitById(
   const financial = calculateNetProfit({
     totalAmount: decimalToNumber(order.totalAmount),
     deliveryCharge: decimalToNumber(order.deliveryCharge),
-    discountAmount: decimalToNumber(order.discountAmount),
     productCostTotal,
     actualCourierCost:
       overrides?.actualCourierCost ?? decimalToNumber(order.actualCourierCost),
     packagingCost:
-      overrides?.packagingCost ?? decimalToNumber(order.packagingCost),
-    paymentFee: overrides?.paymentFee ?? decimalToNumber(order.paymentFee),
-    otherCost: overrides?.otherCost ?? decimalToNumber(order.otherCost),
+      overrides?.packagingCost ?? FIXED_PACKAGING_COST,
   });
 
   return tx.order.update({

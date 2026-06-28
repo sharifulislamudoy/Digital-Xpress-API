@@ -6,9 +6,15 @@ import {
   requireAdminOrModerator,
   type AuthRequest,
 } from "../middleware/auth";
-import { decimalToNumber, calculateNetProfit } from "../lib/inventory";
+import {
+  calculateNetProfit,
+  decimalToNumber,
+  FIXED_PACKAGING_COST,
+} from "../lib/inventory";
 
 const router = Router();
+
+type ProfitReportStatus = "completed" | "delivered" | "returned";
 
 type OrderForReport = Prisma.OrderGetPayload<{
   include: {
@@ -27,15 +33,6 @@ type OrderForReport = Prisma.OrderGetPayload<{
     };
   };
 }>;
-
-const statuses: OrderStatus[] = [
-  "pending",
-  "processing",
-  "shipped",
-  "delivered",
-  "returned",
-  "cancelled",
-];
 
 function sendError(res: Response, error: unknown, fallback = "Server error") {
   console.error(error);
@@ -66,16 +63,20 @@ function endOfDay(date: Date) {
   return next;
 }
 
-function getStatusFilter(value: unknown): OrderStatus[] | undefined {
+function getProfitReportStatus(value: unknown): ProfitReportStatus {
   const raw =
-    typeof value === "string" ? value.trim().toLowerCase() : "delivered";
+    typeof value === "string" ? value.trim().toLowerCase() : "completed";
 
-  if (raw === "all") return undefined;
-  if (raw === "expected") return ["pending", "processing", "shipped"];
-  if (raw === "delivered-profit") return ["delivered"];
-  if (statuses.includes(raw as OrderStatus)) return [raw as OrderStatus];
+  if (raw === "delivered") return "delivered";
+  if (raw === "returned" || raw === "return") return "returned";
 
-  return ["delivered"];
+  return "completed";
+}
+
+function getStatusFilter(status: ProfitReportStatus): OrderStatus[] {
+  if (status === "delivered") return ["delivered"];
+  if (status === "returned") return ["returned"];
+  return ["delivered", "returned"];
 }
 
 function itemCost(item: OrderForReport["items"][number]) {
@@ -92,12 +93,7 @@ function itemCost(item: OrderForReport["items"][number]) {
 }
 
 function itemProfit(item: OrderForReport["items"][number]) {
-  const savedProfit = decimalToNumber(item.profit);
-  if (savedProfit !== 0) return savedProfit;
-
   const cost = itemCost(item);
-  if (cost <= 0) return 0;
-
   return money(decimalToNumber(item.totalPrice) - cost);
 }
 
@@ -109,31 +105,22 @@ function normalizeOrder(order: OrderForReport) {
   const dueAmount = decimalToNumber(order.dueAmount);
   const codAmount = decimalToNumber(order.codAmount);
   const actualCourierCost = decimalToNumber(order.actualCourierCost);
-  const packagingCost = decimalToNumber(order.packagingCost);
+  const packagingCost =
+    decimalToNumber(order.packagingCost) || FIXED_PACKAGING_COST;
   const paymentFee = decimalToNumber(order.paymentFee);
   const otherCost = decimalToNumber(order.otherCost);
 
-  const productCostTotalFromItems = money(
+  const productCostTotal = money(
     order.items.reduce((sum, item) => sum + itemCost(item), 0),
   );
-
-  const hasItemCost = productCostTotalFromItems > 0;
-  const productCostTotal = hasItemCost
-    ? productCostTotalFromItems
-    : decimalToNumber(order.productCostTotal);
 
   const financial = calculateNetProfit({
     totalAmount,
     deliveryCharge,
-    discountAmount,
     productCostTotal,
     actualCourierCost,
     packagingCost,
-    paymentFee,
-    otherCost,
   });
-
-  const isDeadOrder = order.status === "cancelled";
 
   return {
     ...order,
@@ -143,13 +130,13 @@ function normalizeOrder(order: OrderForReport) {
     paidAmount,
     dueAmount,
     codAmount,
-    productCostTotal: isDeadOrder ? 0 : productCostTotal,
-    grossProfit: isDeadOrder ? 0 : financial.grossProfit,
+    productCostTotal,
+    grossProfit: financial.grossProfit,
     actualCourierCost,
     packagingCost,
     paymentFee,
     otherCost,
-    netProfit: isDeadOrder ? 0 : financial.netProfit,
+    netProfit: financial.netProfit,
     items: order.items.map((item) => ({
       ...item,
       unitPrice: decimalToNumber(item.unitPrice),
@@ -175,20 +162,17 @@ router.get(
 
       const from = startOfDay(parseDateParam(req.query.from, defaultFrom));
       const to = endOfDay(parseDateParam(req.query.to, now));
-      const rawStatus =
-        typeof req.query.status === "string" ? req.query.status : "delivered";
-      const statusFilter = getStatusFilter(rawStatus);
-
-      const where: Prisma.OrderWhereInput = {
-        createdAt: {
-          gte: from,
-          lte: to,
-        },
-        ...(statusFilter ? { status: { in: statusFilter } } : {}),
-      };
+      const reportStatus = getProfitReportStatus(req.query.status);
+      const statusFilter = getStatusFilter(reportStatus);
 
       const orders = await prisma.order.findMany({
-        where,
+        where: {
+          status: { in: statusFilter },
+          createdAt: {
+            gte: from,
+            lte: to,
+          },
+        },
         include: {
           items: {
             include: {
@@ -206,6 +190,7 @@ router.get(
           },
         },
         orderBy: { createdAt: "desc" },
+        take: 1000,
       });
 
       const normalizedOrders = orders.map(normalizeOrder);
@@ -215,16 +200,10 @@ router.get(
           acc.orderCount += 1;
           acc.totalSales += order.totalAmount;
           acc.deliveryCharge += order.deliveryCharge;
-          acc.discountAmount += order.discountAmount;
-          acc.paidAmount += order.paidAmount;
-          acc.dueAmount += order.dueAmount;
-          acc.codAmount += order.codAmount;
           acc.productCostTotal += order.productCostTotal;
           acc.grossProfit += order.grossProfit;
           acc.actualCourierCost += order.actualCourierCost;
           acc.packagingCost += order.packagingCost;
-          acc.paymentFee += order.paymentFee;
-          acc.otherCost += order.otherCost;
           acc.netProfit += order.netProfit;
           return acc;
         },
@@ -232,16 +211,10 @@ router.get(
           orderCount: 0,
           totalSales: 0,
           deliveryCharge: 0,
-          discountAmount: 0,
-          paidAmount: 0,
-          dueAmount: 0,
-          codAmount: 0,
           productCostTotal: 0,
           grossProfit: 0,
           actualCourierCost: 0,
           packagingCost: 0,
-          paymentFee: 0,
-          otherCost: 0,
           netProfit: 0,
         },
       );
@@ -254,20 +227,24 @@ router.get(
           totalSales: number;
           productCostTotal: number;
           grossProfit: number;
+          actualCourierCost: number;
+          packagingCost: number;
           netProfit: number;
         }
       >();
 
-      for (const status of statuses) {
+      (["delivered", "returned"] as OrderStatus[]).forEach((status) => {
         statusBreakdownMap.set(status, {
           status,
           orderCount: 0,
           totalSales: 0,
           productCostTotal: 0,
           grossProfit: 0,
+          actualCourierCost: 0,
+          packagingCost: 0,
           netProfit: 0,
         });
-      }
+      });
 
       for (const order of normalizedOrders) {
         const current = statusBreakdownMap.get(order.status);
@@ -277,6 +254,8 @@ router.get(
         current.totalSales += order.totalAmount;
         current.productCostTotal += order.productCostTotal;
         current.grossProfit += order.grossProfit;
+        current.actualCourierCost += order.actualCourierCost;
+        current.packagingCost += order.packagingCost;
         current.netProfit += order.netProfit;
       }
 
@@ -321,9 +300,7 @@ router.get(
           totalCost: money(item.totalCost),
           profit: money(item.profit),
           profitMargin:
-            item.totalSales > 0
-              ? money((item.profit / item.totalSales) * 100)
-              : 0,
+            item.totalSales > 0 ? money((item.profit / item.totalSales) * 100) : 0,
         }))
         .sort((a, b) => b.profit - a.profit)
         .slice(0, 50);
@@ -345,8 +322,10 @@ router.get(
         range: {
           from: from.toISOString(),
           to: to.toISOString(),
-          status: rawStatus,
+          status: reportStatus,
         },
+        formula:
+          "netProfit = totalSales - productCostTotal + deliveryCharge - actualCourierCost - packagingCost",
         summary: Object.fromEntries(
           Object.entries(summary).map(([key, value]) => [
             key,
@@ -359,6 +338,8 @@ router.get(
             totalSales: money(item.totalSales),
             productCostTotal: money(item.productCostTotal),
             grossProfit: money(item.grossProfit),
+            actualCourierCost: money(item.actualCourierCost),
+            packagingCost: money(item.packagingCost),
             netProfit: money(item.netProfit),
           }),
         ),
@@ -385,7 +366,9 @@ router.post(
       const invoiceNo =
         typeof req.body.invoiceNo === "string" ? req.body.invoiceNo.trim() : "";
 
-      const where: Prisma.OrderWhereInput = invoiceNo ? { invoiceNo } : {};
+      const where: Prisma.OrderWhereInput = invoiceNo
+        ? { invoiceNo }
+        : { status: { in: ["delivered", "returned"] } };
 
       const orders = await prisma.order.findMany({
         where,
@@ -402,7 +385,7 @@ router.post(
           },
         },
         orderBy: { createdAt: "asc" },
-        take: invoiceNo ? 1 : 500,
+        take: invoiceNo ? 1 : 1000,
       });
 
       let updatedOrders = 0;
@@ -428,9 +411,7 @@ router.post(
 
               if (unitCost > 0) {
                 totalCost = money(unitCost * item.quantity);
-                const profit = money(
-                  decimalToNumber(item.totalPrice) - totalCost,
-                );
+                const profit = money(decimalToNumber(item.totalPrice) - totalCost);
 
                 await tx.orderItem.update({
                   where: { id: item.id },
@@ -454,24 +435,24 @@ router.post(
             productCostTotal += totalCost;
           }
 
+          const packagingCost =
+            decimalToNumber(order.packagingCost) || FIXED_PACKAGING_COST;
+
           const financial = calculateNetProfit({
             totalAmount: decimalToNumber(order.totalAmount),
             deliveryCharge: decimalToNumber(order.deliveryCharge),
-            discountAmount: decimalToNumber(order.discountAmount),
             productCostTotal,
             actualCourierCost: decimalToNumber(order.actualCourierCost),
-            packagingCost: decimalToNumber(order.packagingCost),
-            paymentFee: decimalToNumber(order.paymentFee),
-            otherCost: decimalToNumber(order.otherCost),
+            packagingCost,
           });
 
           await tx.order.update({
             where: { id: order.id },
             data: {
               productCostTotal: money(productCostTotal),
-              grossProfit:
-                order.status === "cancelled" ? 0 : financial.grossProfit,
-              netProfit: order.status === "cancelled" ? 0 : financial.netProfit,
+              grossProfit: financial.grossProfit,
+              packagingCost,
+              netProfit: financial.netProfit,
             },
           });
 
@@ -518,24 +499,22 @@ router.get(
         lastPurchaseCost: decimalToNumber(product.lastPurchaseCost),
         stockValue: decimalToNumber(product.stockValue),
         sellingPrice: decimalToNumber(product.sellingPrice),
-        estimatedSalesValue: money(
-          product.stock * decimalToNumber(product.sellingPrice),
-        ),
+        retailValue: money(decimalToNumber(product.sellingPrice) * product.stock),
       }));
 
       const summary = rows.reduce(
         (acc, row) => {
           acc.productCount += 1;
-          acc.stockQuantity += row.stock;
+          acc.totalStock += row.stock;
           acc.stockValue += row.stockValue;
-          acc.estimatedSalesValue += row.estimatedSalesValue;
+          acc.retailValue += row.retailValue;
           return acc;
         },
         {
           productCount: 0,
-          stockQuantity: 0,
+          totalStock: 0,
           stockValue: 0,
-          estimatedSalesValue: 0,
+          retailValue: 0,
         },
       );
 
@@ -544,10 +523,8 @@ router.get(
         summary: {
           ...summary,
           stockValue: money(summary.stockValue),
-          estimatedSalesValue: money(summary.estimatedSalesValue),
-          estimatedProfit: money(
-            summary.estimatedSalesValue - summary.stockValue,
-          ),
+          retailValue: money(summary.retailValue),
+          potentialProfit: money(summary.retailValue - summary.stockValue),
         },
         rows,
       });

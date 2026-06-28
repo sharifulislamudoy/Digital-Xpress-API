@@ -28,8 +28,8 @@ import {
 
 const router = Router();
 
-const DHAKA_DELIVERY_CHARGE = 80;
-const OUTSIDE_DHAKA_DELIVERY_CHARGE = 130;
+const DELIVERY_CHARGE_SETTING_KEY = "delivery_charge_by_district";
+const DEFAULT_PACKAGING_COST = 20;
 
 const allowedOrderStatuses: OrderStatus[] = [
   "pending",
@@ -222,14 +222,58 @@ function getPaymentStatus(total: number, paid: number): PaymentStatus {
   return "partial";
 }
 
-function isDhakaDistrict(district: string) {
-  return district.trim().toLowerCase().startsWith("dhaka");
+type DeliveryChargeSetting = {
+  district: string;
+  charge: number;
+};
+
+function normalizeDeliveryChargeRows(value: unknown): DeliveryChargeSetting[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+
+      const district =
+        typeof (item as any).district === "string"
+          ? (item as any).district.trim()
+          : "";
+
+      const parsedCharge = Number((item as any).charge);
+      const charge = Number.isFinite(parsedCharge)
+        ? Math.max(Number(parsedCharge.toFixed(2)), 0)
+        : 0;
+
+      if (!district) return null;
+
+      return { district, charge };
+    })
+    .filter((item): item is DeliveryChargeSetting => Boolean(item));
 }
 
-function calculateDeliveryCharge(district: string) {
-  return isDhakaDistrict(district)
-    ? DHAKA_DELIVERY_CHARGE
-    : OUTSIDE_DHAKA_DELIVERY_CHARGE;
+async function readDeliveryChargeRows(
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const setting = await tx.storeSetting.findUnique({
+    where: { key: DELIVERY_CHARGE_SETTING_KEY },
+  });
+
+  return normalizeDeliveryChargeRows(setting?.value);
+}
+
+async function getDeliveryChargeByDistrict(
+  district: string,
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const districtKey = district.trim().toLowerCase();
+  if (!districtKey) return 0;
+
+  const rows = await readDeliveryChargeRows(tx);
+  const matched = rows.find(
+    (item) => item.district.trim().toLowerCase() === districtKey,
+  );
+
+  return matched ? toMoney(matched.charge) : 0;
 }
 
 function getStatusTimestampData(
@@ -514,6 +558,70 @@ async function restoreProductStocksForOrder(
   }
 }
 
+router.get("/delivery-charges/public", async (_req, res) => {
+  try {
+    const charges = await readDeliveryChargeRows();
+
+    return res.json({
+      success: true,
+      charges,
+      chargeByDistrict: Object.fromEntries(
+        charges.map((item) => [item.district, item.charge]),
+      ),
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to load delivery charges");
+  }
+});
+
+router.get(
+  "/admin/delivery-charges",
+  authenticate,
+  requireAdminOrModerator,
+  async (_req: AuthRequest, res) => {
+    try {
+      const charges = await readDeliveryChargeRows();
+
+      return res.json({
+        success: true,
+        charges,
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to load delivery charges");
+    }
+  },
+);
+
+router.put(
+  "/admin/delivery-charges",
+  authenticate,
+  requireAdminOrModerator,
+  async (req: AuthRequest, res) => {
+    try {
+      const charges = normalizeDeliveryChargeRows(req.body.charges);
+
+      await prisma.storeSetting.upsert({
+        where: { key: DELIVERY_CHARGE_SETTING_KEY },
+        create: {
+          key: DELIVERY_CHARGE_SETTING_KEY,
+          value: charges as Prisma.InputJsonValue,
+        },
+        update: {
+          value: charges as Prisma.InputJsonValue,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: "Delivery charges updated successfully",
+        charges,
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to update delivery charges");
+    }
+  },
+);
+
 router.get("/checkout-profile", authenticate, async (req: AuthRequest, res) => {
   if (!req.user) {
     return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -648,7 +756,7 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
         .toFixed(2),
     );
 
-    const deliveryCharge = calculateDeliveryCharge(district);
+    const deliveryCharge = await getDeliveryChargeByDistrict(district);
     const discountAmount = 0;
     const grandTotal = Number(
       (totalAmount + deliveryCharge - discountAmount).toFixed(2),
@@ -723,8 +831,8 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
       const financial = calculateNetProfit({
         totalAmount,
         deliveryCharge,
-        discountAmount,
         productCostTotal,
+        packagingCost: DEFAULT_PACKAGING_COST,
       });
 
       const created = await tx.order.create({
@@ -752,6 +860,7 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
           status: "pending",
           productCostTotal,
           grossProfit: financial.grossProfit,
+          packagingCost: DEFAULT_PACKAGING_COST,
           netProfit: financial.netProfit,
           items: {
             create: orderItemsWithCost,
@@ -1026,11 +1135,19 @@ router.patch(
         120,
       );
       const courierNote = optionalString(req.body.courierNote, 400);
+      const actualCourierCost = toMoney(req.body.actualCourierCost);
 
       if (status === "shipped" && !courierName) {
         return res.status(400).json({
           success: false,
           message: "Courier name is required before changing order to shipped",
+        });
+      }
+
+      if (status === "shipped" && actualCourierCost <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Courier company cost is required before changing order to shipped",
         });
       }
 
@@ -1092,15 +1209,15 @@ router.patch(
                     courierTrackingNumber:
                       courierTrackingNumber || order.courierTrackingNumber,
                     courierNote: courierNote || order.courierNote,
+                    actualCourierCost,
+                    packagingCost: DEFAULT_PACKAGING_COST,
                     courierAssignedAt:
                       hasCourierInfo && !order.courierAssignedAt
                         ? new Date()
                         : order.courierAssignedAt,
                   }
                 : {}),
-              ...(status === "cancelled" || status === "returned"
-                ? { netProfit: 0 }
-                : {}),
+              ...(status === "cancelled" ? { netProfit: 0 } : {}),
               ...getStatusTimestampData(status, order),
             },
             include: {
@@ -1116,11 +1233,11 @@ router.patch(
             },
           });
 
-          if (status !== "cancelled" && status !== "returned") {
-            updated = (await recalculateOrderProfitById(
-              tx,
-              updated.id,
-            )) as unknown as OrderWithItems;
+          if (status !== "cancelled") {
+            updated = (await recalculateOrderProfitById(tx, updated.id, {
+              actualCourierCost: decimalToNumber(updated.actualCourierCost),
+              packagingCost: DEFAULT_PACKAGING_COST,
+            })) as unknown as OrderWithItems;
           }
 
           results.push(updated);
@@ -1195,12 +1312,10 @@ router.patch(
           ? requiredString(req.body.district, "District", 80)
           : existing.district;
 
-      const autoDeliveryCharge = calculateDeliveryCharge(district);
-
       const deliveryCharge =
         req.body.deliveryCharge !== undefined
-          ? toMoney(req.body.deliveryCharge, autoDeliveryCharge)
-          : autoDeliveryCharge;
+          ? toMoney(req.body.deliveryCharge)
+          : await getDeliveryChargeByDistrict(district);
 
       const discountAmount =
         req.body.discountAmount !== undefined
@@ -1242,10 +1357,7 @@ router.patch(
           ? toMoney(req.body.actualCourierCost)
           : decimalToNumber((existing as any).actualCourierCost);
 
-      const packagingCost =
-        req.body.packagingCost !== undefined
-          ? toMoney(req.body.packagingCost)
-          : decimalToNumber((existing as any).packagingCost);
+      const packagingCost = DEFAULT_PACKAGING_COST;
 
       const paymentFee =
         req.body.paymentFee !== undefined
@@ -1261,6 +1373,13 @@ router.patch(
         return res.status(400).json({
           success: false,
           message: "Courier name is required before changing order to shipped",
+        });
+      }
+
+      if (status === "shipped" && actualCourierCost <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Courier company cost is required before changing order to shipped",
         });
       }
 
@@ -1326,8 +1445,6 @@ router.patch(
           paymentStatus: getPaymentStatus(grandTotal, paidAmount),
           actualCourierCost,
           packagingCost,
-          paymentFee,
-          otherCost,
 
           note:
             req.body.note !== undefined
@@ -1372,7 +1489,7 @@ router.patch(
           await restoreProductStocksForOrder(tx, existing);
         }
 
-        if (status === "cancelled" || status === "returned") {
+        if (status === "cancelled") {
           return tx.order.update({
             where: { invoiceNo },
             data: { netProfit: 0 },
@@ -1388,8 +1505,6 @@ router.patch(
         const recalculated = await recalculateOrderProfitById(tx, updated.id, {
           actualCourierCost,
           packagingCost,
-          paymentFee,
-          otherCost,
         });
 
         return recalculated as unknown as OrderWithItems;

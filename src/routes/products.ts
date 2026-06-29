@@ -402,11 +402,6 @@ function normalizeStockStatus(value: unknown): StockStatus {
   return StockStatus.IN_STOCK;
 }
 
-function clampRating(value: unknown) {
-  const rating = numberFromBody(value, 0);
-  return Math.min(Math.max(rating, 0), 5);
-}
-
 const orderBlockingStockStatuses: readonly StockStatus[] = [
   StockStatus.OUT_OF_STOCK,
   StockStatus.COMING_SOON,
@@ -899,7 +894,6 @@ function serializeProduct(
     productType: product.productType,
 
     sku: product.sku,
-    productCode: product.productCode,
     barcode: product.barcode,
     modelName: product.modelName,
 
@@ -927,7 +921,6 @@ function serializeProduct(
 
     isPublished: product.isPublished,
     isFeatured: product.isFeatured,
-    isNewArrival: product.isNewArrival,
     isBestSeller: product.isBestSeller,
     isTrending: product.isTrending,
     isRecommended: product.isRecommended,
@@ -959,48 +952,18 @@ function serializeProduct(
     refundPolicy: product.refundPolicy,
 
     deliveryInfo: product.deliveryInfo,
-    deliveryCharge:
-      product.deliveryCharge === null ? null : Number(product.deliveryCharge),
-    insideDhakaDeliveryCharge:
-      product.insideDhakaDeliveryCharge === null
-        ? null
-        : Number(product.insideDhakaDeliveryCharge),
-    outsideDhakaDeliveryCharge:
-      product.outsideDhakaDeliveryCharge === null
-        ? null
-        : Number(product.outsideDhakaDeliveryCharge),
     deliveryTime: product.deliveryTime,
     cashOnDelivery: product.cashOnDelivery,
     freeDelivery: product.freeDelivery,
-    freeDeliveryMinAmount:
-      product.freeDeliveryMinAmount === null
-        ? null
-        : Number(product.freeDeliveryMinAmount),
 
     packageIncludes: product.packageIncludes || [],
     packageWeight: product.packageWeight,
     packageDimensions: product.packageDimensions,
 
-    seoTitle: product.seoTitle,
-    seoDescription: product.seoDescription,
-    seoKeywords: product.seoKeywords || [],
-    focusKeyword: product.focusKeyword,
-    canonicalUrl: product.canonicalUrl,
-    ogTitle: product.ogTitle,
-    ogDescription: product.ogDescription,
-    ogImage: product.ogImage,
-    metaRobots: product.metaRobots,
-    schemaJson: product.schemaJson,
-
-    viewCount: product.viewCount,
-    wishlistCount: product.wishlistCount,
-    cartCount: product.cartCount,
-    orderCount: product.orderCount,
     averageRating: Number(product.averageRating || 0),
     totalReviews: product.totalReviews,
     reviews: (product.reviews ?? []).map((review) => serializeReview(review)),
 
-    publishedAt: product.publishedAt,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,
   };
@@ -1008,8 +971,6 @@ function serializeProduct(
   if (options.showStockQuantity) {
     serialized.stock = product.stock;
     serialized.lowStockAlertQuantity = product.lowStockAlertQuantity;
-    serialized.soldQuantity = product.soldQuantity;
-    serialized.reservedQuantity = product.reservedQuantity;
   }
 
   if (options.internal) {
@@ -1019,20 +980,6 @@ function serializeProduct(
     serialized.mainImagePublicId = product.mainImagePublicId;
     serialized.hoverImagePublicId = product.hoverImagePublicId;
     serialized.videoPublicId = product.videoPublicId;
-
-    serialized.supplierName = product.supplierName;
-    serialized.supplierPhone = product.supplierPhone;
-    serialized.supplierEmail = product.supplierEmail;
-    serialized.supplierAddress = product.supplierAddress;
-    serialized.supplierInvoiceNumber = product.supplierInvoiceNumber;
-    serialized.internalNote = product.internalNote;
-
-    serialized.createdById = product.createdById;
-    serialized.createdByName = product.createdByName;
-    serialized.createdByEmail = product.createdByEmail;
-    serialized.updatedById = product.updatedById;
-    serialized.updatedByName = product.updatedByName;
-    serialized.updatedByEmail = product.updatedByEmail;
   }
 
   return serialized;
@@ -1050,7 +997,6 @@ function buildProductData(
     productType: normalizeProductType(body.productType),
 
     sku: optionalString(body.sku),
-    productCode: optionalString(body.productCode),
     barcode: optionalString(body.barcode),
     modelName: optionalString(body.modelName),
 
@@ -1070,14 +1016,11 @@ function buildProductData(
     stock: signedIntFromBody(body.stock, 0),
     stockStatus,
     lowStockAlertQuantity: intFromBody(body.lowStockAlertQuantity, 5),
-    soldQuantity: intFromBody(body.soldQuantity, 0),
-    reservedQuantity: intFromBody(body.reservedQuantity, 0),
 
     inStock: booleanFromBody(body.inStock, canAddToCartByStatus(stockStatus)),
     isPublished,
 
     isFeatured: booleanFromBody(body.isFeatured, false),
-    isNewArrival: booleanFromBody(body.isNewArrival, false),
     isBestSeller: booleanFromBody(body.isBestSeller, false),
     isTrending: booleanFromBody(body.isTrending, false),
     isRecommended: booleanFromBody(body.isRecommended, false),
@@ -1097,52 +1040,14 @@ function buildProductData(
     refundPolicy: optionalString(body.refundPolicy),
 
     deliveryInfo: optionalString(body.deliveryInfo),
-    deliveryCharge: optionalNumberFromBody(body.deliveryCharge),
-    insideDhakaDeliveryCharge: optionalNumberFromBody(
-      body.insideDhakaDeliveryCharge,
-    ),
-    outsideDhakaDeliveryCharge: optionalNumberFromBody(
-      body.outsideDhakaDeliveryCharge,
-    ),
     deliveryTime: optionalString(body.deliveryTime),
     cashOnDelivery: booleanFromBody(body.cashOnDelivery, true),
     freeDelivery: booleanFromBody(body.freeDelivery, false),
-    freeDeliveryMinAmount: optionalNumberFromBody(body.freeDeliveryMinAmount),
 
     packageIncludes: parseStringArray(body.packageIncludes),
     packageWeight: optionalString(body.packageWeight),
     packageDimensions: optionalString(body.packageDimensions),
 
-    supplierName: optionalString(body.supplierName),
-    supplierPhone: optionalString(body.supplierPhone),
-    supplierEmail: optionalString(body.supplierEmail),
-    supplierAddress: optionalString(body.supplierAddress),
-    supplierInvoiceNumber: optionalString(body.supplierInvoiceNumber),
-    internalNote: optionalString(body.internalNote),
-
-    seoTitle: optionalString(body.seoTitle),
-    seoDescription: optionalString(body.seoDescription),
-    seoKeywords: parseStringArray(body.seoKeywords),
-    focusKeyword: optionalString(body.focusKeyword),
-    canonicalUrl: optionalString(body.canonicalUrl),
-    ogTitle: optionalString(body.ogTitle),
-    ogDescription: optionalString(body.ogDescription),
-    ogImage: optionalString(body.ogImage),
-    metaRobots: optionalString(body.metaRobots) || "index,follow",
-    schemaJson: parseJson(body.schemaJson),
-
-    viewCount: intFromBody(body.viewCount, 0),
-    wishlistCount: intFromBody(body.wishlistCount, 0),
-    cartCount: intFromBody(body.cartCount, 0),
-    orderCount: intFromBody(body.orderCount, 0),
-    averageRating: clampRating(body.averageRating),
-    totalReviews: intFromBody(body.totalReviews, 0),
-
-    publishedAt: isPublished
-      ? optionalString(body.publishedAt)
-        ? new Date(String(body.publishedAt))
-        : new Date()
-      : null,
   };
 }
 
@@ -1451,7 +1356,6 @@ router.get(
           { name: { contains: search, mode: "insensitive" } },
           { slug: { contains: search, mode: "insensitive" } },
           { sku: { contains: search, mode: "insensitive" } },
-          { productCode: { contains: search, mode: "insensitive" } },
           { barcode: { contains: search, mode: "insensitive" } },
           { modelName: { contains: search, mode: "insensitive" } },
         ];
@@ -1577,7 +1481,6 @@ router.get("/", async (req, res) => {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },
         { modelName: { contains: search, mode: "insensitive" } },
-        { productCode: { contains: search, mode: "insensitive" } },
         { barcode: { contains: search, mode: "insensitive" } },
         { shortDescription: { contains: search, mode: "insensitive" } },
         { description: { contains: search, mode: "insensitive" } },
@@ -1609,7 +1512,7 @@ router.get("/", async (req, res) => {
         : sort === "price-high"
           ? { sellingPrice: "desc" }
           : sort === "popular"
-            ? { orderCount: "desc" }
+            ? { totalReviews: "desc" }
             : sort === "rating"
               ? { averageRating: "desc" }
               : { createdAt: "desc" };
@@ -1702,12 +1605,6 @@ router.post(
           hoverImagePublicId: hoverUploaded?.public_id || null,
           videoUrl: videoUploaded?.secure_url || null,
           videoPublicId: videoUploaded?.public_id || null,
-          createdById: req.user?.id || null,
-          createdByEmail: req.user?.email || null,
-          createdByName: null,
-          updatedById: req.user?.id || null,
-          updatedByEmail: req.user?.email || null,
-          updatedByName: null,
         },
         include: productInclude,
       });
@@ -1948,9 +1845,6 @@ router.patch(
           hoverImagePublicId,
           videoUrl,
           videoPublicId,
-          updatedById: req.user?.id || null,
-          updatedByEmail: req.user?.email || null,
-          updatedByName: null,
         },
       });
 
@@ -2015,8 +1909,6 @@ router.patch(
         data: {
           stockStatus,
           inStock: canAddToCartByStatus(stockStatus),
-          updatedById: req.user?.id || null,
-          updatedByEmail: req.user?.email || null,
         },
         include: productInclude,
       });
@@ -2055,13 +1947,10 @@ router.patch(
           isPublished: booleanFromBody(req.body.isPublished, true),
           inStock: booleanFromBody(req.body.inStock, true),
           isFeatured: booleanFromBody(req.body.isFeatured, false),
-          isNewArrival: booleanFromBody(req.body.isNewArrival, false),
           isBestSeller: booleanFromBody(req.body.isBestSeller, false),
           isTrending: booleanFromBody(req.body.isTrending, false),
           isRecommended: booleanFromBody(req.body.isRecommended, false),
           isFlashSale: booleanFromBody(req.body.isFlashSale, false),
-          updatedById: req.user?.id || null,
-          updatedByEmail: req.user?.email || null,
         },
         include: productInclude,
       });
@@ -2505,19 +2394,9 @@ router.get("/:slugOrId", async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
-    await prisma.product.update({
-      where: { id: product.id },
-      data: {
-        viewCount: { increment: 1 },
-      },
-    });
-
     return res.json({
       success: true,
-      product: serializeProduct(
-        { ...product, viewCount: product.viewCount + 1 },
-        { showStockQuantity: true },
-      ),
+      product: serializeProduct(product, { showStockQuantity: true }),
     });
   } catch (error) {
     return sendError(res, error, "Failed to fetch product details");

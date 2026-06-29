@@ -25,6 +25,10 @@ import {
   calculateNetProfit,
   recalculateOrderProfitById,
 } from "../lib/inventory";
+import {
+  consumeCouponForOrder,
+  validateCouponForCheckout,
+} from "../lib/coupon";
 
 const router = Router();
 
@@ -60,6 +64,7 @@ type ProductForCheckout = Prisma.ProductGetPayload<{
     slug: true;
     sku: true;
     mainImageUrl: true;
+    categoryId: true;
     sellingPrice: true;
     costPrice: true;
     stock: true;
@@ -300,6 +305,8 @@ function serializeOrder(order: OrderWithItems) {
   const totalAmount = decimalToNumber(order.totalAmount);
   const deliveryCharge = decimalToNumber(order.deliveryCharge);
   const discountAmount = decimalToNumber(order.discountAmount);
+  const couponDiscountPercentage = decimalToNumber((order as any).couponDiscountPercentage);
+  const couponDiscountAmount = decimalToNumber((order as any).couponDiscountAmount);
   const paidAmount = decimalToNumber(order.paidAmount);
   const dueAmount = decimalToNumber(order.dueAmount);
   const codAmount = decimalToNumber(order.codAmount);
@@ -316,6 +323,11 @@ function serializeOrder(order: OrderWithItems) {
     totalAmount,
     deliveryCharge,
     discountAmount,
+    couponId: (order as any).couponId || null,
+    couponCode: (order as any).couponCode || null,
+    couponDiscountScope: (order as any).couponDiscountScope || null,
+    couponDiscountPercentage,
+    couponDiscountAmount,
     paidAmount,
     dueAmount,
     codAmount,
@@ -331,6 +343,10 @@ function serializeOrder(order: OrderWithItems) {
           ...item,
           unitPrice: decimalToNumber(item.unitPrice),
           totalPrice: decimalToNumber(item.totalPrice),
+          originalUnitPrice: decimalToNumber((item as any).originalUnitPrice),
+          unitDiscountAmount: decimalToNumber((item as any).unitDiscountAmount),
+          discountedUnitPrice: decimalToNumber((item as any).discountedUnitPrice),
+          lineDiscountAmount: decimalToNumber((item as any).lineDiscountAmount),
           unitCostPrice: decimalToNumber((item as any).unitCostPrice),
           totalCost: decimalToNumber((item as any).totalCost),
           profit: decimalToNumber((item as any).profit),
@@ -684,6 +700,7 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
     const thana = optionalString(req.body.thana, 80);
     const note = optionalString(req.body.note, 400);
     const deliveryType = normalizeDeliveryType(req.body.deliveryType);
+    const couponCode = optionalString(req.body.couponCode, 40);
 
     const productIds = normalizedItems.map((item) => item.productId);
 
@@ -695,6 +712,7 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
         slug: true,
         sku: true,
         mainImageUrl: true,
+        categoryId: true,
         sellingPrice: true,
         costPrice: true,
         stock: true,
@@ -716,63 +734,39 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
       products.map((product) => [product.id, product]),
     );
 
-    const orderItems: Prisma.OrderItemUncheckedCreateWithoutOrderInput[] =
-      normalizedItems.map((item) => {
-        const product = productMap.get(item.productId);
+    for (const item of normalizedItems) {
+      const product = productMap.get(item.productId);
 
-        if (!product) {
-          throw new Error("Product not found");
-        }
+      if (!product) {
+        throw new Error("Product not found");
+      }
 
-        if (!canBuyProduct(product)) {
-          throw new Error(`${product.name} is not available for checkout`);
-        }
-
-        // Do not block checkout by database stock.
-        // Even if stock is 0, the order will be accepted.
-        // Inventory cost will fall back to available FIFO batch, legacy costPrice,
-        // or backorder cost calculation.
-
-        const unitPrice = decimalToNumber(product.sellingPrice);
-        const totalPrice = unitPrice * item.quantity;
-
-        return {
-          productId: product.id,
-          productName: product.name,
-          productSlug: product.slug,
-          productImage: product.mainImageUrl,
-          sku: product.sku,
-          quantity: item.quantity,
-          unitPrice,
-          totalPrice,
-        };
-      });
-
-    const totalAmount = Number(
-      orderItems
-        .reduce((sum, item) => {
-          return sum + decimalToNumber(item.totalPrice);
-        }, 0)
-        .toFixed(2),
-    );
+      if (!canBuyProduct(product)) {
+        throw new Error(`${product.name} is not available for checkout`);
+      }
+    }
 
     const deliveryCharge = await getDeliveryChargeByDistrict(district);
-    const discountAmount = 0;
-    const grandTotal = Number(
-      (totalAmount + deliveryCharge - discountAmount).toFixed(2),
-    );
     const paidAmount = 0;
-    const dueAmount = Math.max(Number((grandTotal - paidAmount).toFixed(2)), 0);
-    const codAmount = dueAmount;
-    const paymentStatus = getPaymentStatus(grandTotal, paidAmount);
 
-    const itemDescription = orderItems
-      .map((item) => `${item.productName} x ${item.quantity}`)
+    const itemDescription = normalizedItems
+      .map((item) => {
+        const product = productMap.get(item.productId);
+        return `${product?.name || "Product"} x ${item.quantity}`;
+      })
       .join(", ")
       .slice(0, 400);
 
     const order = await prisma.$transaction(async (tx) => {
       const invoiceNo = await generateInvoiceNo(tx);
+
+      const couponValidation = couponCode
+        ? await validateCouponForCheckout(tx, {
+            code: couponCode,
+            userId: req.user!.id,
+            items: normalizedItems,
+          })
+        : null;
 
       const orderItemsWithCost: Prisma.OrderItemUncheckedCreateWithoutOrderInput[] =
         [];
@@ -784,13 +778,29 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
           throw new Error("Product not found");
         }
 
-        const unitPrice = decimalToNumber(product.sellingPrice);
-        const totalPrice = Number((unitPrice * item.quantity).toFixed(2));
+        const originalUnitPrice = decimalToNumber(product.sellingPrice);
+        const originalLineTotal = Number(
+          (originalUnitPrice * item.quantity).toFixed(2),
+        );
+        const lineDiscountAmount = Number(
+          (couponValidation?.itemDiscountsByProductId[product.id] || 0).toFixed(
+            2,
+          ),
+        );
+        const unitDiscountAmount = Number(
+          (lineDiscountAmount / item.quantity).toFixed(2),
+        );
+        const discountedUnitPrice = Number(
+          Math.max(originalUnitPrice - unitDiscountAmount, 0).toFixed(2),
+        );
+        const totalPrice = Number(
+          Math.max(originalLineTotal - lineDiscountAmount, 0).toFixed(2),
+        );
 
         /**
          * Do NOT call consumeFifoInventory here.
-         * That helper can auto-update stockStatus/inStock when stock reaches 0.
          * This checkout keeps product status 100% manual.
+         * Stock can become negative and stockStatus/inStock will not auto-change.
          */
         const unitCostPrice = decimalToNumber(product.costPrice);
         const totalCost = Number((unitCostPrice * item.quantity).toFixed(2));
@@ -803,19 +813,44 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
           productImage: product.mainImageUrl,
           sku: product.sku,
           quantity: item.quantity,
-          unitPrice,
+          unitPrice: discountedUnitPrice,
           totalPrice,
+          originalUnitPrice,
+          unitDiscountAmount,
+          discountedUnitPrice,
+          lineDiscountAmount,
           unitCostPrice,
           totalCost,
           profit,
           costBreakdown: {
             source: "MANUAL_STOCK_CHECKOUT",
             note: "Checkout decremented product stock only. stockStatus and inStock are manual and were not changed.",
+            originalUnitPrice,
+            unitDiscountAmount,
+            discountedUnitPrice,
+            lineDiscountAmount,
             unitCostPrice,
             totalCost,
           } as Prisma.InputJsonValue,
         });
       }
+
+      const totalAmount = Number(
+        orderItemsWithCost
+          .reduce((sum, item) => sum + decimalToNumber(item.totalPrice), 0)
+          .toFixed(2),
+      );
+
+      const discountAmount = Number(
+        (couponValidation?.discountAmount || 0).toFixed(2),
+      );
+      const grandTotal = Number((totalAmount + deliveryCharge).toFixed(2));
+      const dueAmount = Math.max(
+        Number((grandTotal - paidAmount).toFixed(2)),
+        0,
+      );
+      const codAmount = dueAmount;
+      const paymentStatus = getPaymentStatus(grandTotal, paidAmount);
 
       await deductProductStocksAfterOrder(tx, normalizedItems, productMap);
 
@@ -851,6 +886,11 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
           totalAmount,
           deliveryCharge,
           discountAmount,
+          couponId: couponValidation?.coupon.id || null,
+          couponCode: couponValidation?.coupon.code || null,
+          couponDiscountScope: couponValidation?.scope || null,
+          couponDiscountPercentage: couponValidation?.discountPercentage || null,
+          couponDiscountAmount: discountAmount,
           paidAmount,
           dueAmount,
           codAmount,
@@ -879,6 +919,16 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
         },
       });
 
+      if (couponValidation) {
+        await consumeCouponForOrder(tx, {
+          coupon: couponValidation.coupon,
+          userId: req.user!.id,
+          orderId: created.id,
+          discountPercentage: couponValidation.discountPercentage,
+          discountAmount,
+        });
+      }
+
       await tx.user.update({
         where: { id: req.user!.id },
         data: {
@@ -902,9 +952,14 @@ router.post("/checkout", authenticate, async (req: AuthRequest, res) => {
       message: "Order created successfully",
       order: serializeOrder(order),
     });
-  } catch (error) {
+  } catch (error: any) {
     const message =
-      error instanceof Error ? error.message : "Failed to create order";
+      error?.code === "P2002"
+        ? "You already used this coupon once"
+        : error instanceof Error
+          ? error.message
+          : "Failed to create order";
+
     return res.status(400).json({ success: false, message });
   }
 });
@@ -1323,7 +1378,7 @@ router.patch(
           : decimalToNumber(existing.discountAmount);
 
       const grandTotal = Math.max(
-        Number((totalAmount + deliveryCharge - discountAmount).toFixed(2)),
+        Number((totalAmount + deliveryCharge).toFixed(2)),
         0,
       );
 

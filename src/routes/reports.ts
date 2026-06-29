@@ -200,6 +200,7 @@ router.get(
           acc.orderCount += 1;
           acc.totalSales += order.totalAmount;
           acc.deliveryCharge += order.deliveryCharge;
+          acc.discountAmount += order.discountAmount;
           acc.productCostTotal += order.productCostTotal;
           acc.grossProfit += order.grossProfit;
           acc.actualCourierCost += order.actualCourierCost;
@@ -211,6 +212,7 @@ router.get(
           orderCount: 0,
           totalSales: 0,
           deliveryCharge: 0,
+          discountAmount: 0,
           productCostTotal: 0,
           grossProfit: 0,
           actualCourierCost: 0,
@@ -225,6 +227,7 @@ router.get(
           status: OrderStatus;
           orderCount: number;
           totalSales: number;
+          discountAmount: number;
           productCostTotal: number;
           grossProfit: number;
           actualCourierCost: number;
@@ -238,6 +241,7 @@ router.get(
           status,
           orderCount: 0,
           totalSales: 0,
+          discountAmount: 0,
           productCostTotal: 0,
           grossProfit: 0,
           actualCourierCost: 0,
@@ -252,6 +256,7 @@ router.get(
 
         current.orderCount += 1;
         current.totalSales += order.totalAmount;
+        current.discountAmount += order.discountAmount;
         current.productCostTotal += order.productCostTotal;
         current.grossProfit += order.grossProfit;
         current.actualCourierCost += order.actualCourierCost;
@@ -325,7 +330,7 @@ router.get(
           status: reportStatus,
         },
         formula:
-          "netProfit = totalSales - productCostTotal + deliveryCharge - actualCourierCost - packagingCost",
+          "netProfit = discountedProductSales - productCostTotal + deliveryCharge - actualCourierCost - packagingCost",
         summary: Object.fromEntries(
           Object.entries(summary).map(([key, value]) => [
             key,
@@ -336,6 +341,7 @@ router.get(
           (item) => ({
             ...item,
             totalSales: money(item.totalSales),
+            discountAmount: money(item.discountAmount),
             productCostTotal: money(item.productCostTotal),
             grossProfit: money(item.grossProfit),
             actualCourierCost: money(item.actualCourierCost),

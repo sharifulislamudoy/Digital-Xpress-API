@@ -47,6 +47,12 @@ enum DeliveryType {
   point
 }
 
+enum CouponScope {
+  ALL_PRODUCTS
+  CATEGORY
+  PRODUCT
+}
+
 enum InventoryMovementType {
   PURCHASE
   SALE
@@ -75,9 +81,11 @@ model User {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  banners Banner[]
-  orders  Order[]
-  reviews ProductReview[]
+  banners           Banner[]
+  orders            Order[]
+  reviews           ProductReview[]
+  createdCoupons    Coupon[]           @relation("CouponCreatedBy")
+  couponRedemptions CouponRedemption[]
 }
 
 model PendingRegistration {
@@ -128,12 +136,12 @@ model ProductCategory {
   name String
   slug String @unique
 
-  description String?
-  imageUrl    String?
+  description             String?
+  imageUrl                String?
   imageCloudinaryPublicId String?
-  iconSvg     String?
-  sortOrder   Int     @default(0)
-  isPublished Boolean @default(true)
+  iconSvg                 String?
+  sortOrder               Int     @default(0)
+  isPublished             Boolean @default(true)
 
   seoTitle       String?
   seoDescription String?
@@ -141,6 +149,7 @@ model ProductCategory {
 
   subCategories ProductSubCategory[]
   products      Product[]
+  coupons       Coupon[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -157,12 +166,12 @@ model ProductSubCategory {
   categoryId String
   category   ProductCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
 
-  description String?
-  imageUrl    String?
+  description             String?
+  imageUrl                String?
   imageCloudinaryPublicId String?
-  iconSvg     String?
-  sortOrder   Int     @default(0)
-  isPublished Boolean @default(true)
+  iconSvg                 String?
+  sortOrder               Int     @default(0)
+  isPublished             Boolean @default(true)
 
   seoTitle       String?
   seoDescription String?
@@ -330,6 +339,7 @@ model Product {
   updatedAt   DateTime  @updatedAt
 
   orderItems OrderItem[]
+  coupons    Coupon[]
 
   inventoryBatches   InventoryBatch[]
   inventoryMovements InventoryMovement[]
@@ -374,9 +384,17 @@ model Order {
   totalAmount    Decimal @db.Decimal(12, 2)
   deliveryCharge Decimal @default(0) @db.Decimal(12, 2)
   discountAmount Decimal @default(0) @db.Decimal(12, 2)
-  paidAmount     Decimal @default(0) @db.Decimal(12, 2)
-  dueAmount      Decimal @default(0) @db.Decimal(12, 2)
-  codAmount      Decimal @default(0) @db.Decimal(12, 2)
+
+  couponId                 String?
+  coupon                   Coupon?      @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  couponCode               String?
+  couponDiscountScope      CouponScope?
+  couponDiscountPercentage Decimal?     @db.Decimal(5, 2)
+  couponDiscountAmount     Decimal      @default(0) @db.Decimal(12, 2)
+
+  paidAmount Decimal @default(0) @db.Decimal(12, 2)
+  dueAmount  Decimal @default(0) @db.Decimal(12, 2)
+  codAmount  Decimal @default(0) @db.Decimal(12, 2)
 
   note            String?
   itemDescription String?
@@ -396,7 +414,8 @@ model Order {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  items OrderItem[]
+  items            OrderItem[]
+  couponRedemption CouponRedemption?
 
   productCostTotal    Decimal   @default(0) @db.Decimal(12, 2)
   grossProfit         Decimal   @default(0) @db.Decimal(12, 2)
@@ -411,6 +430,8 @@ model Order {
   @@index([userId])
   @@index([status])
   @@index([customerPhone])
+  @@index([couponId])
+  @@index([couponCode])
   @@index([createdAt])
 }
 
@@ -430,6 +451,11 @@ model OrderItem {
   quantity   Int     @default(1)
   unitPrice  Decimal @db.Decimal(12, 2)
   totalPrice Decimal @db.Decimal(12, 2)
+
+  originalUnitPrice   Decimal @default(0) @db.Decimal(12, 2)
+  unitDiscountAmount  Decimal @default(0) @db.Decimal(12, 2)
+  discountedUnitPrice Decimal @default(0) @db.Decimal(12, 2)
+  lineDiscountAmount  Decimal @default(0) @db.Decimal(12, 2)
 
   createdAt DateTime @default(now())
 
@@ -592,6 +618,75 @@ model InventoryMovement {
   @@index([batchId])
   @@index([type])
   @@index([referenceNo])
+  @@index([createdAt])
+}
+
+model Coupon {
+  id String @id @default(cuid())
+
+  code        String  @unique
+  title       String?
+  description String?
+
+  scope              CouponScope @default(ALL_PRODUCTS)
+  discountPercentage Decimal     @db.Decimal(5, 2)
+  maxDiscountAmount  Decimal?    @db.Decimal(12, 2)
+  minOrderAmount     Decimal     @default(0) @db.Decimal(12, 2)
+
+  usageLimit Int?
+  usedCount  Int  @default(0)
+
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  startsAt DateTime?
+  endsAt   DateTime?
+  isActive Boolean   @default(true)
+
+  createdById    String?
+  createdBy      User?   @relation("CouponCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdByName  String?
+  createdByEmail String?
+
+  orders      Order[]
+  redemptions CouponRedemption[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+  @@index([scope])
+  @@index([categoryId])
+  @@index([productId])
+  @@index([isActive])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+}
+
+model CouponRedemption {
+  id String @id @default(cuid())
+
+  couponId String
+  coupon   Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  couponCode         String
+  discountPercentage Decimal @db.Decimal(5, 2)
+  discountAmount     Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@unique([couponId, userId])
+  @@index([couponCode])
   @@index([createdAt])
 }
 

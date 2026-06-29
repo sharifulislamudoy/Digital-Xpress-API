@@ -799,6 +799,47 @@ async function getPublishedProductReviews(
   }
 }
 
+
+async function updateProductReviewStats(productId: string) {
+  const reviewDelegate = getProductReviewDelegate(prisma);
+
+  if (!reviewDelegate?.aggregate) {
+    return { averageRating: 0, totalReviews: 0 };
+  }
+
+  const aggregate = await reviewDelegate.aggregate({
+    where: {
+      productId,
+      isPublished: true,
+    },
+    _avg: { rating: true },
+    _count: { _all: true },
+  });
+
+  const averageRating = Number((aggregate._avg.rating || 0).toFixed(2));
+  const totalReviews = aggregate._count._all;
+
+  await prisma.product.update({
+    where: { id: productId },
+    data: {
+      averageRating: new Prisma.Decimal(averageRating),
+      totalReviews,
+    },
+  });
+
+  return { averageRating, totalReviews };
+}
+
+async function safeDeleteReviewImagesFromCloudinary(
+  images: Array<{ cloudinaryPublicId?: string | null }>,
+) {
+  await Promise.allSettled(
+    images
+      .filter((image) => Boolean(image.cloudinaryPublicId))
+      .map((image) => deleteFromCloudinary(String(image.cloudinaryPublicId), "image")),
+  );
+}
+
 async function findPublishedProductBySlugOrId(
   slugOrId: string,
 ): Promise<ProductWithRelations | null> {
@@ -2306,6 +2347,142 @@ router.post(
       }
 
       return sendError(res, error, "Failed to save review");
+    }
+  },
+);
+
+router.delete(
+  "/:slugOrId/reviews/:reviewId",
+  authenticate,
+  async (req: AuthRequest, res) => {
+    try {
+      const slugOrId = getStringParam(req.params.slugOrId);
+      const reviewId = getStringParam(req.params.reviewId);
+
+      if (!slugOrId) {
+        return res.status(400).json({
+          success: false,
+          message: "Product slug or ID is required",
+        });
+      }
+
+      if (!reviewId) {
+        return res.status(400).json({
+          success: false,
+          message: "Review ID is required",
+        });
+      }
+
+      const authEmail = req.user?.email?.trim().toLowerCase();
+
+      if (!authEmail) {
+        return res.status(401).json({
+          success: false,
+          message: "Login required to delete a review",
+        });
+      }
+
+      const product = await findPublishedProductBySlugOrId(slugOrId);
+
+      if (!product) {
+        return res.status(404).json({
+          success: false,
+          message: "Product not found",
+        });
+      }
+
+      const reviewDelegate = getProductReviewDelegate(prisma);
+
+      if (!reviewDelegate?.findFirst || !reviewDelegate?.delete) {
+        return res.status(500).json({
+          success: false,
+          message: "Review model is not available in Prisma Client",
+        });
+      }
+
+      let existingReview: any = null;
+
+      try {
+        existingReview = await reviewDelegate.findFirst({
+          where: {
+            id: reviewId,
+            productId: product.id,
+            userEmail: authEmail,
+          },
+          include: {
+            images: true,
+          },
+        });
+      } catch {
+        existingReview = await reviewDelegate.findFirst({
+          where: {
+            id: reviewId,
+            productId: product.id,
+            userEmail: authEmail,
+          },
+        });
+      }
+
+      if (!existingReview) {
+        return res.status(404).json({
+          success: false,
+          message: "Review not found or you are not allowed to delete it",
+        });
+      }
+
+      const imagesToDelete = Array.isArray(existingReview.images)
+        ? existingReview.images
+        : [];
+
+      await prisma.$transaction(async (tx) => {
+        const txReviewDelegate = getProductReviewDelegate(tx);
+        const txReviewImageDelegate = getProductReviewImageDelegate(tx);
+
+        if (txReviewImageDelegate?.deleteMany) {
+          await txReviewImageDelegate.deleteMany({
+            where: { reviewId: existingReview.id },
+          });
+        }
+
+        await txReviewDelegate.delete({
+          where: { id: existingReview.id },
+        });
+
+        const aggregate = await txReviewDelegate.aggregate({
+          where: {
+            productId: product.id,
+            isPublished: true,
+          },
+          _avg: { rating: true },
+          _count: { _all: true },
+        });
+
+        const averageRating = Number((aggregate._avg.rating || 0).toFixed(2));
+        const totalReviews = aggregate._count._all;
+
+        await tx.product.update({
+          where: { id: product.id },
+          data: {
+            averageRating: new Prisma.Decimal(averageRating),
+            totalReviews,
+          },
+        });
+      });
+
+      await safeDeleteReviewImagesFromCloudinary(imagesToDelete);
+
+      const stats = await updateProductReviewStats(product.id);
+      const reviews = await getPublishedProductReviews(product.id);
+
+      return res.json({
+        success: true,
+        message: "Review deleted successfully",
+        reviews: reviews.map((review) => serializeReview(review)),
+        averageRating: stats.averageRating,
+        totalReviews: stats.totalReviews,
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to delete review");
     }
   },
 );

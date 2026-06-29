@@ -724,11 +724,13 @@ export function calculateNetProfit(input: {
   packagingCost?: number;
 }) {
   /**
-   * Simple Digital Xpress formula:
-   * net profit = selling total - product cost + customer delivery charge
-   *              - courier company cost - fixed packaging cost
+   * Digital Xpress formula:
+   * totalAmount = final discounted product selling total.
+   * net profit = totalAmount - productCostTotal + customer delivery charge
+   *              - courier company cost - fixed packaging cost.
    *
-   * Profit report will use this only for delivered and returned orders.
+   * Coupon discount is already deducted from totalAmount and saved separately
+   * on Order.discountAmount / Order.couponDiscountAmount for reporting.
    */
   const productSalesProfit = roundMoney(input.totalAmount - input.productCostTotal);
   const packagingCost =

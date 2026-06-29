@@ -7,6 +7,7 @@ import orderRoutes from "./orders";
 import inventoryRoutes from "./inventory";
 import reportRoutes from "./reports";
 import reviewRoutes from "./reviews";
+import couponRoutes from "./coupon";
 
 const router = Router();
 
@@ -22,5 +23,5 @@ router.use("/orders", orderRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/reports", reportRoutes);
 router.use("/reviews", reviewRoutes);
-
+router.use("/discounts", couponRoutes);
 export default router;

@@ -921,6 +921,7 @@ function serializeProduct(
 
     isPublished: product.isPublished,
     isFeatured: product.isFeatured,
+    isNewArrival: product.isNewArrival,
     isBestSeller: product.isBestSeller,
     isTrending: product.isTrending,
     isRecommended: product.isRecommended,
@@ -1021,6 +1022,7 @@ function buildProductData(
     isPublished,
 
     isFeatured: booleanFromBody(body.isFeatured, false),
+    isNewArrival: booleanFromBody(body.isNewArrival, false),
     isBestSeller: booleanFromBody(body.isBestSeller, false),
     isTrending: booleanFromBody(body.isTrending, false),
     isRecommended: booleanFromBody(body.isRecommended, false),
@@ -1947,6 +1949,7 @@ router.patch(
           isPublished: booleanFromBody(req.body.isPublished, true),
           inStock: booleanFromBody(req.body.inStock, true),
           isFeatured: booleanFromBody(req.body.isFeatured, false),
+          isNewArrival: booleanFromBody(req.body.isNewArrival, false),
           isBestSeller: booleanFromBody(req.body.isBestSeller, false),
           isTrending: booleanFromBody(req.body.isTrending, false),
           isRecommended: booleanFromBody(req.body.isRecommended, false),
@@ -1965,6 +1968,85 @@ router.patch(
       });
     } catch (error) {
       return sendError(res, error, "Failed to update product flags");
+    }
+  },
+);
+
+
+router.delete(
+  "/:id",
+  authenticate,
+  requireAdminOrModerator,
+  async (req: AuthRequest, res) => {
+    try {
+      const productId = getStringParam(req.params.id);
+
+      if (!productId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Product ID is required" });
+      }
+
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+        include: {
+          extraImages: true,
+          sizeChart: true,
+          reviews: {
+            include: {
+              images: true,
+            },
+          },
+        },
+      });
+
+      if (!product) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Product not found" });
+      }
+
+      const cloudinaryItems: Array<{
+        publicId?: string | null;
+        resourceType: "image" | "video";
+      }> = [
+        { publicId: product.mainImagePublicId, resourceType: "image" },
+        { publicId: product.hoverImagePublicId, resourceType: "image" },
+        { publicId: product.videoPublicId, resourceType: "video" },
+        ...product.extraImages.map((image) => ({
+          publicId: image.cloudinaryPublicId,
+          resourceType: "image" as const,
+        })),
+        {
+          publicId: product.sizeChart?.cloudinaryPublicId,
+          resourceType: "image" as const,
+        },
+        ...product.reviews.flatMap((review) =>
+          review.images.map((image) => ({
+            publicId: image.cloudinaryPublicId,
+            resourceType: "image" as const,
+          })),
+        ),
+      ];
+
+      await prisma.product.delete({
+        where: { id: product.id },
+      });
+
+      await Promise.allSettled(
+        cloudinaryItems
+          .filter((item) => Boolean(item.publicId))
+          .map((item) =>
+            deleteFromCloudinary(String(item.publicId), item.resourceType),
+          ),
+      );
+
+      return res.json({
+        success: true,
+        message: "Product deleted successfully",
+      });
+    } catch (error) {
+      return sendError(res, error, "Failed to delete product");
     }
   },
 );

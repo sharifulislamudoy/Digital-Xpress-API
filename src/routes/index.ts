@@ -3,6 +3,7 @@ import authRoutes from "./auth";
 import usersRoutes from "./users";
 import bannerRoutes from "./banner";
 import productRoutes from "./products";
+import categoryRoutes from "./category";
 import orderRoutes from "./orders";
 import inventoryRoutes from "./inventory";
 import reportRoutes from "./reports";
@@ -24,4 +25,8 @@ router.use("/inventory", inventoryRoutes);
 router.use("/reports", reportRoutes);
 router.use("/reviews", reviewRoutes);
 router.use("/discounts", couponRoutes);
+router.use("/categories", categoryRoutes);
+
+
+
 export default router;

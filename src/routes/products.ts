@@ -68,7 +68,7 @@ function handleReviewImageUpload(
         error.code === "LIMIT_FILE_SIZE"
           ? "Each review photo must be 5MB or smaller"
           : error.code === "LIMIT_FILE_COUNT" ||
-              error.code === "LIMIT_UNEXPECTED_FILE"
+            error.code === "LIMIT_UNEXPECTED_FILE"
             ? "You can upload maximum 10 review photos"
             : error.message;
 
@@ -521,72 +521,20 @@ async function createUniqueSlug(
 async function resolveCategoryId(body: any) {
   const categoryId =
     typeof body.categoryId === "string" ? body.categoryId.trim() : "";
-  const categoryName =
-    typeof body.categoryName === "string" ? body.categoryName.trim() : "";
 
-  if (categoryId) {
-    const category = await prisma.productCategory.findUnique({
-      where: { id: categoryId },
-    });
-
-    if (!category) throw new Error("Category not found");
-
-    if (hasCategoryMeta(body)) {
-      const nextName = categoryName || category.name;
-      const slug = await createUniqueSlug(
-        categorySlugFromBody(body, nextName),
-        "category",
-        undefined,
-        category.id,
-      );
-
-      await prisma.productCategory.update({
-        where: { id: category.id },
-        data: {
-          name: nextName,
-          slug,
-          ...buildCategoryMetaData(body),
-        },
-      });
-    }
-
-    return category.id;
+  if (!categoryId) {
+    throw new Error(
+      "Category is required. Create category from Category Management first.",
+    );
   }
 
-  if (!categoryName) throw new Error("Category is required");
-
-  const baseSlug = slugify(categorySlugFromBody(body, categoryName));
-
-  const existing = await prisma.productCategory.findUnique({
-    where: { slug: baseSlug },
+  const category = await prisma.productCategory.findUnique({
+    where: { id: categoryId },
   });
 
-  if (existing) {
-    if (hasCategoryMeta(body)) {
-      await prisma.productCategory.update({
-        where: { id: existing.id },
-        data: {
-          name: categoryName,
-          ...buildCategoryMetaData(body),
-        },
-      });
-    }
-
-    return existing.id;
+  if (!category) {
+    throw new Error("Category not found");
   }
-
-  const slug = await createUniqueSlug(
-    categorySlugFromBody(body, categoryName),
-    "category",
-  );
-
-  const category = await prisma.productCategory.create({
-    data: {
-      name: categoryName,
-      slug,
-      ...buildCategoryMetaData(body),
-    },
-  });
 
   return category.id;
 }
@@ -594,84 +542,20 @@ async function resolveCategoryId(body: any) {
 async function resolveSubCategoryId(body: any, categoryId: string) {
   const subCategoryId =
     typeof body.subCategoryId === "string" ? body.subCategoryId.trim() : "";
-  const subCategoryName =
-    typeof body.subCategoryName === "string" ? body.subCategoryName.trim() : "";
 
-  if (subCategoryId) {
-    const subCategory = await prisma.productSubCategory.findUnique({
-      where: { id: subCategoryId },
-    });
+  if (!subCategoryId) return null;
 
-    if (!subCategory) throw new Error("Sub-category not found");
-
-    if (subCategory.categoryId !== categoryId) {
-      throw new Error("Sub-category does not belong to selected category");
-    }
-
-    if (hasSubCategoryMeta(body)) {
-      const nextName = subCategoryName || subCategory.name;
-      const slug = await createUniqueSlug(
-        subCategorySlugFromBody(body, nextName),
-        "subCategory",
-        categoryId,
-        subCategory.id,
-      );
-
-      await prisma.productSubCategory.update({
-        where: { id: subCategory.id },
-        data: {
-          name: nextName,
-          slug,
-          categoryId,
-          ...buildSubCategoryMetaData(body),
-        },
-      });
-    }
-
-    return subCategory.id;
-  }
-
-  if (!subCategoryName) return null;
-
-  const baseSlug = slugify(subCategorySlugFromBody(body, subCategoryName));
-
-  const existing = await prisma.productSubCategory.findUnique({
-    where: {
-      categoryId_slug: {
-        categoryId,
-        slug: baseSlug,
-      },
-    },
+  const subCategory = await prisma.productSubCategory.findUnique({
+    where: { id: subCategoryId },
   });
 
-  if (existing) {
-    if (hasSubCategoryMeta(body)) {
-      await prisma.productSubCategory.update({
-        where: { id: existing.id },
-        data: {
-          name: subCategoryName,
-          ...buildSubCategoryMetaData(body),
-        },
-      });
-    }
-
-    return existing.id;
+  if (!subCategory) {
+    throw new Error("Sub-category not found");
   }
 
-  const slug = await createUniqueSlug(
-    subCategorySlugFromBody(body, subCategoryName),
-    "subCategory",
-    categoryId,
-  );
-
-  const subCategory = await prisma.productSubCategory.create({
-    data: {
-      name: subCategoryName,
-      slug,
-      categoryId,
-      ...buildSubCategoryMetaData(body),
-    },
-  });
+  if (subCategory.categoryId !== categoryId) {
+    throw new Error("Sub-category does not belong to selected category");
+  }
 
   return subCategory.id;
 }
@@ -1150,155 +1034,6 @@ function sendError(res: any, error: unknown, fallbackMessage: string) {
   return res.status(500).json({ success: false, message: fallbackMessage });
 }
 
-router.post(
-  "/categories-with-subcategory",
-  authenticate,
-  requireAdminOrModerator,
-  productUpload,
-  async (req: AuthRequest, res) => {
-    const uploadedImages: { public_id: string; resourceType: "image" }[] = [];
-
-    try {
-      const files = getFilesFromRequest(req);
-      const categoryName = requiredString(
-        req.body.categoryName,
-        "Category name",
-      );
-      const categorySlug = await createUniqueSlug(
-        optionalString(req.body.categorySlug) || categoryName,
-        "category",
-      );
-
-      const categoryImage = files.categoryImage?.[0];
-      const subCategoryImage = files.subCategoryImage?.[0];
-
-      let categoryImageUrl: string | null = null;
-      let categoryImageCloudinaryPublicId: string | null = null;
-      let subCategoryImageUrl: string | null = null;
-      let subCategoryImageCloudinaryPublicId: string | null = null;
-
-      if (categoryImage) {
-        if (!categoryImage.mimetype.startsWith("image/")) {
-          throw new Error("Category image must be an image file");
-        }
-
-        const uploaded = await uploadImageToCloudinary(
-          categoryImage.buffer,
-          "digital-xpress/categories",
-        );
-        uploadedImages.push({
-          public_id: uploaded.public_id,
-          resourceType: "image",
-        });
-        categoryImageUrl = uploaded.secure_url;
-        categoryImageCloudinaryPublicId = uploaded.public_id;
-      }
-
-      const category = await prisma.productCategory.create({
-        data: {
-          name: categoryName,
-          slug: categorySlug,
-          description: optionalString(req.body.categoryDescription),
-          imageUrl: categoryImageUrl,
-          imageCloudinaryPublicId: categoryImageCloudinaryPublicId,
-          iconSvg: optionalSvg(req.body.categoryIconSvg),
-          sortOrder: intFromBody(req.body.categorySortOrder, 0),
-          isPublished: booleanFromBody(req.body.categoryIsPublished, true),
-          seoTitle: optionalString(req.body.categorySeoTitle),
-          seoDescription: optionalString(req.body.categorySeoDescription),
-          seoKeywords: parseStringArray(req.body.categorySeoKeywords),
-        } as Prisma.ProductCategoryUncheckedCreateInput,
-      });
-
-      const shouldCreateSubCategory = booleanFromBody(
-        req.body.createSubCategory,
-        Boolean(optionalString(req.body.subCategoryName)),
-      );
-
-      let subCategory = null;
-
-      if (shouldCreateSubCategory) {
-        const subCategoryName = requiredString(
-          req.body.subCategoryName,
-          "Sub-category name",
-        );
-        const subCategorySlug = await createUniqueSlug(
-          optionalString(req.body.subCategorySlug) || subCategoryName,
-          "subCategory",
-          category.id,
-        );
-
-        if (subCategoryImage) {
-          if (!subCategoryImage.mimetype.startsWith("image/")) {
-            throw new Error("Sub-category image must be an image file");
-          }
-
-          const uploaded = await uploadImageToCloudinary(
-            subCategoryImage.buffer,
-            "digital-xpress/sub-categories",
-          );
-          uploadedImages.push({
-            public_id: uploaded.public_id,
-            resourceType: "image",
-          });
-          subCategoryImageUrl = uploaded.secure_url;
-          subCategoryImageCloudinaryPublicId = uploaded.public_id;
-        }
-
-        subCategory = await prisma.productSubCategory.create({
-          data: {
-            name: subCategoryName,
-            slug: subCategorySlug,
-            categoryId: category.id,
-            description: optionalString(req.body.subCategoryDescription),
-            imageUrl: subCategoryImageUrl,
-            imageCloudinaryPublicId: subCategoryImageCloudinaryPublicId,
-            iconSvg: optionalSvg(req.body.subCategoryIconSvg),
-            sortOrder: intFromBody(req.body.subCategorySortOrder, 0),
-            isPublished: booleanFromBody(req.body.subCategoryIsPublished, true),
-            seoTitle: optionalString(req.body.subCategorySeoTitle),
-            seoDescription: optionalString(req.body.subCategorySeoDescription),
-            seoKeywords: parseStringArray(req.body.subCategorySeoKeywords),
-          } as Prisma.ProductSubCategoryUncheckedCreateInput,
-        });
-      }
-
-      const savedCategory = await prisma.productCategory.findUnique({
-        where: { id: category.id },
-        include: {
-          subCategories: {
-            orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-          },
-        },
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: "Category created successfully",
-        category: savedCategory || category,
-        subCategory,
-      });
-    } catch (error: any) {
-      if (uploadedImages.length > 0) {
-        await Promise.allSettled(
-          uploadedImages.map((image) =>
-            deleteFromCloudinary(image.public_id, image.resourceType),
-          ),
-        );
-      }
-
-      if (error?.code === "P2002") {
-        return res.status(409).json({
-          success: false,
-          message: `Duplicate value found for ${error.meta?.target || "unique field"}`,
-        });
-      }
-
-      return sendError(res, error, "Failed to create category");
-    }
-  },
-);
-
 router.get("/meta", async (req, res) => {
   try {
     const scope = getStringParam(req.query.scope);
@@ -1577,15 +1312,15 @@ router.post(
         ),
         files.hoverImage?.[0]
           ? uploadImageToCloudinary(
-              files.hoverImage[0].buffer,
-              "digital-xpress/products/hover",
-            )
+            files.hoverImage[0].buffer,
+            "digital-xpress/products/hover",
+          )
           : Promise.resolve(null),
         files.video?.[0]
           ? uploadVideoToCloudinary(
-              files.video[0].buffer,
-              "digital-xpress/products/videos",
-            )
+            files.video[0].buffer,
+            "digital-xpress/products/videos",
+          )
           : Promise.resolve(null),
       ]);
 
@@ -2010,24 +1745,24 @@ router.delete(
         publicId?: string | null;
         resourceType: "image" | "video";
       }> = [
-        { publicId: product.mainImagePublicId, resourceType: "image" },
-        { publicId: product.hoverImagePublicId, resourceType: "image" },
-        { publicId: product.videoPublicId, resourceType: "video" },
-        ...product.extraImages.map((image) => ({
-          publicId: image.cloudinaryPublicId,
-          resourceType: "image" as const,
-        })),
-        {
-          publicId: product.sizeChart?.cloudinaryPublicId,
-          resourceType: "image" as const,
-        },
-        ...product.reviews.flatMap((review) =>
-          review.images.map((image) => ({
+          { publicId: product.mainImagePublicId, resourceType: "image" },
+          { publicId: product.hoverImagePublicId, resourceType: "image" },
+          { publicId: product.videoPublicId, resourceType: "video" },
+          ...product.extraImages.map((image) => ({
             publicId: image.cloudinaryPublicId,
             resourceType: "image" as const,
           })),
-        ),
-      ];
+          {
+            publicId: product.sizeChart?.cloudinaryPublicId,
+            resourceType: "image" as const,
+          },
+          ...product.reviews.flatMap((review) =>
+            review.images.map((image) => ({
+              publicId: image.cloudinaryPublicId,
+              resourceType: "image" as const,
+            })),
+          ),
+        ];
 
       await prisma.product.delete({
         where: { id: product.id },

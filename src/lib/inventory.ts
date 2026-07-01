@@ -236,14 +236,8 @@ export async function createPurchaseBatch(
           ? undefined
           : toMoney(input.sellingPrice),
       totalCost,
-      supplierName: input.supplierName || null,
-      supplierPhone: input.supplierPhone || null,
-      supplierInvoiceNumber: input.supplierInvoiceNumber || null,
       purchaseDate: input.purchaseDate || new Date(),
       note: input.note || null,
-      createdById: input.actor?.id || null,
-      createdByName: input.actor?.name || null,
-      createdByEmail: input.actor?.email || null,
     },
   });
 
@@ -258,9 +252,6 @@ export async function createPurchaseBatch(
       reason: input.note || "Stock purchase",
       referenceType: "PURCHASE_BATCH",
       referenceNo: batch.batchNo,
-      createdById: input.actor?.id || null,
-      createdByName: input.actor?.name || null,
-      createdByEmail: input.actor?.email || null,
     },
   });
 
@@ -317,16 +308,6 @@ export async function consumeFifoInventory(
         reason: input.reason || "Pre-order accepted",
         referenceType: input.referenceType || "ORDER",
         referenceNo: input.referenceNo || null,
-        createdById: input.actor?.id || null,
-        createdByName: input.actor?.name || null,
-        createdByEmail: input.actor?.email || null,
-      },
-    });
-
-    await tx.product.update({
-      where: { id: product.id },
-      data: {
-        soldQuantity: { increment: quantity },
       },
     });
 
@@ -427,9 +408,6 @@ export async function consumeFifoInventory(
         reason: input.reason || "Order checkout stock deduction",
         referenceType: input.referenceType || "ORDER",
         referenceNo: input.referenceNo || null,
-        createdById: input.actor?.id || null,
-        createdByName: input.actor?.name || null,
-        createdByEmail: input.actor?.email || null,
       },
     });
 
@@ -465,9 +443,6 @@ export async function consumeFifoInventory(
           reason: "Legacy stock fallback deduction",
           referenceType: input.referenceType || "ORDER",
           referenceNo: input.referenceNo || null,
-          createdById: input.actor?.id || null,
-          createdByName: input.actor?.name || null,
-          createdByEmail: input.actor?.email || null,
         },
       });
 
@@ -505,9 +480,6 @@ export async function consumeFifoInventory(
         reason: input.reason || "Out-of-stock order accepted",
         referenceType: input.referenceType || "ORDER",
         referenceNo: input.referenceNo || null,
-        createdById: input.actor?.id || null,
-        createdByName: input.actor?.name || null,
-        createdByEmail: input.actor?.email || null,
       },
     });
 
@@ -524,17 +496,14 @@ export async function consumeFifoInventory(
     requiredQty = 0;
   }
 
-  await tx.product.update({
-    where: { id: product.id },
-    data: {
-      ...(stockDeductQuantity > 0
-        ? {
-            stock: { decrement: stockDeductQuantity },
-          }
-        : {}),
-      soldQuantity: { increment: quantity },
-    },
-  });
+  if (stockDeductQuantity > 0) {
+    await tx.product.update({
+      where: { id: product.id },
+      data: {
+        stock: { decrement: stockDeductQuantity },
+      },
+    });
+  }
 
   const afterProduct = await tx.product.findUnique({
     where: { id: product.id },
@@ -634,9 +603,6 @@ export async function restoreInventoryForOrder(
           reason: input.reason || `Stock restored from ${order.invoiceNo}`,
           referenceType: "ORDER",
           referenceNo: order.invoiceNo,
-          createdById: input.actor?.id || null,
-          createdByName: input.actor?.name || null,
-          createdByEmail: input.actor?.email || null,
         },
       });
 
@@ -683,22 +649,12 @@ export async function restoreInventoryForOrder(
             reason: input.reason || `Stock restored from ${order.invoiceNo}`,
             referenceType: "ORDER",
             referenceNo: order.invoiceNo,
-            createdById: input.actor?.id || null,
-            createdByName: input.actor?.name || null,
-            createdByEmail: input.actor?.email || null,
           },
         });
 
         shouldRefreshProductStock = true;
       }
     }
-
-    await tx.product.update({
-      where: { id: item.productId },
-      data: {
-        soldQuantity: { decrement: item.quantity },
-      },
-    });
 
     if (shouldRefreshProductStock) {
       await refreshProductInventorySummary(tx, item.productId);

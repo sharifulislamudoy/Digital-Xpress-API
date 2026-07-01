@@ -335,9 +335,6 @@ async function consumeStockForAdjustment(
         totalCost,
         reason: input.reason,
         referenceType: "MANUAL_ADJUSTMENT",
-        createdById: input.actor.id,
-        createdByName: input.actor.name,
-        createdByEmail: input.actor.email,
       },
     });
 
@@ -448,7 +445,6 @@ router.patch(
 
         const productResetData: Prisma.ProductUpdateManyMutationInput = {
           stock: 0,
-          reservedQuantity: 0,
           averageCost: 0,
           stockValue: 0,
           lastPurchaseCost: null,
@@ -495,47 +491,42 @@ router.get(
       const limit = Math.min(Math.max(Number(req.query.limit || 25), 1), 100);
       const skip = (page - 1) * limit;
 
-      const where: Prisma.ProductWhereInput = {
-        ...(status !== "all" ? { stockStatus: status as any } : {}),
-        ...(search
-          ? {
-              OR: [
-                {
-                  name: {
-                    contains: search,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  sku: {
-                    contains: search,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  productCode: {
-                    contains: search,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  modelName: {
-                    contains: search,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  brand: {
-                    name: {
-                      contains: search,
-                      mode: "insensitive",
-                    },
-                  },
-                },
-              ],
-            }
-          : {}),
-      };
+      const where: Prisma.ProductWhereInput = {};
+
+      if (status !== "all") {
+        where.stockStatus = status as StockStatus;
+      }
+
+      if (search) {
+        where.OR = [
+          {
+            name: {
+              contains: search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          },
+          {
+            sku: {
+              contains: search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          },
+          {
+            modelName: {
+              contains: search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          },
+          {
+            brand: {
+              name: {
+                contains: search,
+                mode: Prisma.QueryMode.insensitive,
+              },
+            },
+          },
+        ];
+      }
 
       const [products, total] = await Promise.all([
         prisma.product.findMany({
@@ -670,12 +661,6 @@ router.post(
             req.body.sellingPrice === undefined
               ? null
               : toMoney(req.body.sellingPrice),
-          supplierName: optionalString(req.body.supplierName, 120),
-          supplierPhone: optionalString(req.body.supplierPhone, 30),
-          supplierInvoiceNumber: optionalString(
-            req.body.supplierInvoiceNumber,
-            120
-          ),
           purchaseDate: parseDate(req.body.purchaseDate),
           note: optionalString(req.body.note, 400),
           actor: actorFromReq(req),

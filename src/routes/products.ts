@@ -1067,6 +1067,154 @@ router.get("/meta", async (req, res) => {
   }
 });
 
+router.get("/search", async (req, res) => {
+  try {
+    const query = (getStringParam(req.query.q) || getStringParam(req.query.search) || "").trim();
+    const limit = Math.min(
+      Math.max(numberFromBody(req.query.limit, 12), 1),
+      30,
+    );
+
+    if (query.length < 2) {
+      return res.json({
+        success: true,
+        query,
+        products: [],
+        categories: [],
+        subCategories: [],
+        brands: [],
+      });
+    }
+
+    const productWhere: Prisma.ProductWhereInput = {
+      isPublished: true,
+      OR: [
+        { name: { contains: query, mode: "insensitive" } },
+        { slug: { contains: query, mode: "insensitive" } },
+        { sku: { contains: query, mode: "insensitive" } },
+        { barcode: { contains: query, mode: "insensitive" } },
+        { modelName: { contains: query, mode: "insensitive" } },
+        { shortDescription: { contains: query, mode: "insensitive" } },
+        { description: { contains: query, mode: "insensitive" } },
+        { category: { name: { contains: query, mode: "insensitive" } } },
+        { category: { slug: { contains: query, mode: "insensitive" } } },
+        { subCategory: { name: { contains: query, mode: "insensitive" } } },
+        { subCategory: { slug: { contains: query, mode: "insensitive" } } },
+        { brand: { name: { contains: query, mode: "insensitive" } } },
+        { brand: { slug: { contains: query, mode: "insensitive" } } },
+      ],
+    };
+
+    const [products, categories, subCategories, brands] = await Promise.all([
+      prisma.product.findMany({
+        where: productWhere,
+        include: productInclude,
+        orderBy: [
+          { isFeatured: "desc" },
+          { isBestSeller: "desc" },
+          { createdAt: "desc" },
+        ],
+        take: limit,
+      }),
+      prisma.productCategory.findMany({
+        where: {
+          isPublished: true,
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { slug: { contains: query, mode: "insensitive" } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          imageUrl: true,
+          iconSvg: true,
+          _count: { select: { products: true } },
+        },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+        take: 6,
+      }),
+      prisma.productSubCategory.findMany({
+        where: {
+          isPublished: true,
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { slug: { contains: query, mode: "insensitive" } },
+            { category: { name: { contains: query, mode: "insensitive" } } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          imageUrl: true,
+          iconSvg: true,
+          category: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+            },
+          },
+          _count: { select: { products: true } },
+        },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+        take: 6,
+      }),
+      prisma.brand.findMany({
+        where: {
+          OR: [
+            { name: { contains: query, mode: "insensitive" } },
+            { slug: { contains: query, mode: "insensitive" } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logoUrl: true,
+          _count: { select: { products: true } },
+        },
+        orderBy: { name: "asc" },
+        take: 8,
+      }),
+    ]);
+
+    return res.json({
+      success: true,
+      query,
+      products: products.map((product) => serializeProduct(product)),
+      categories: categories.map((category) => ({
+        id: category.id,
+        name: category.name,
+        slug: category.slug,
+        imageUrl: category.imageUrl,
+        iconSvg: category.iconSvg,
+        productCount: category._count.products,
+      })),
+      subCategories: subCategories.map((subCategory) => ({
+        id: subCategory.id,
+        name: subCategory.name,
+        slug: subCategory.slug,
+        imageUrl: subCategory.imageUrl,
+        iconSvg: subCategory.iconSvg,
+        category: subCategory.category,
+        productCount: subCategory._count.products,
+      })),
+      brands: brands.map((brand) => ({
+        id: brand.id,
+        name: brand.name,
+        slug: brand.slug,
+        logoUrl: brand.logoUrl,
+        productCount: brand._count.products,
+      })),
+    });
+  } catch (error) {
+    return sendError(res, error, "Failed to search products");
+  }
+});
+
 router.get(
   "/admin",
   authenticate,
@@ -1217,10 +1365,18 @@ router.get("/", async (req, res) => {
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },
+        { slug: { contains: search, mode: "insensitive" } },
+        { sku: { contains: search, mode: "insensitive" } },
         { modelName: { contains: search, mode: "insensitive" } },
         { barcode: { contains: search, mode: "insensitive" } },
         { shortDescription: { contains: search, mode: "insensitive" } },
         { description: { contains: search, mode: "insensitive" } },
+        { category: { name: { contains: search, mode: "insensitive" } } },
+        { category: { slug: { contains: search, mode: "insensitive" } } },
+        { subCategory: { name: { contains: search, mode: "insensitive" } } },
+        { subCategory: { slug: { contains: search, mode: "insensitive" } } },
+        { brand: { name: { contains: search, mode: "insensitive" } } },
+        { brand: { slug: { contains: search, mode: "insensitive" } } },
       ];
     }
 
